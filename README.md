@@ -1,5 +1,20 @@
 # Aegisub
 
+## MCP fork
+
+This fork adds opt-in, local Model Context Protocol support for the live Aegisub
+window: read subtitles and styles, edit text and metadata, shift timing, select
+lines, and Undo/Redo. Edits are revision-checked and participate in normal Undo.
+
+See **[MCP setup and usage](docs/mcp.md)**. The integration consists of a native
+bridge in this fork plus a Python stdio server in `mcp/`. An upstream Aegisub
+binary does not contain the bridge. Normal launches leave MCP disabled.
+
+The initial integration does not add/delete lines, edit style definitions, open
+media, execute Lua, or save files remotely. Save and review changes in the GUI.
+
+---
+
 For binaries and general information [see the homepage](http://aegisub.org).
 
 The bug tracker can be found at https://github.com/TypesettingTools/Aegisub/issues.

@@ -32,6 +32,7 @@
 /// @ingroup main_ui
 
 #include "frame_main.h"
+#include "mcp_bridge.h"
 
 #include "include/aegisub/context.h"
 #include "include/aegisub/menu.h"
@@ -160,9 +161,11 @@ FrameMain::FrameMain()
 	SetDisplayMode(1, 1);
 
 	StartupLog("Leaving FrameMain constructor");
+	mcp_bridge = std::make_unique<McpBridge>(context.get());
 }
 
 FrameMain::~FrameMain () {
+	mcp_bridge.reset();
 	context->project->CloseAudio();
 	context->project->CloseVideo();
 
