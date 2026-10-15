@@ -15,10 +15,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
+#include <vector>
 #include <wx/utils.h>
 
 namespace {
@@ -44,6 +47,91 @@ void Keys(json::Object const& args, std::initializer_list<std::string> allowed) 
 	for (auto const& [key, value] : args)
 		if (std::find(allowed.begin(), allowed.end(), key) == allowed.end())
 			throw std::runtime_error("Unknown argument: " + key);
+}
+double Number(json::UnknownElement const& value, double low, double high) {
+	double n;
+	try { n = static_cast<json::Double const&>(value); }
+	catch (json::Exception const&) { n = static_cast<json::Integer const&>(value); }
+	if (!std::isfinite(n) || n < low || n > high) throw std::runtime_error("Number outside allowed range");
+	return n;
+}
+
+std::string StyleName(json::UnknownElement const& value) {
+	auto name = String(value, true);
+	if (name.empty() || name.size() > 256 ||
+		wxString::FromUTF8(name).Trim().Trim(false) != wxString::FromUTF8(name))
+		throw std::runtime_error("Style/font names must be nonempty, trimmed, and at most 256 UTF-8 bytes");
+	return name;
+}
+
+agi::Color Color(json::UnknownElement const& value) {
+	auto color = String(value);
+	if (color.size() != 10 || color.substr(0, 2) != "&H" ||
+		color.find_first_not_of("0123456789abcdefABCDEF", 2) != std::string::npos)
+		throw std::runtime_error("Colors must use ASS &HAABBGGRR (00 alpha is opaque)");
+	return agi::Color(color);
+}
+
+json::Object Style(AssStyle const& style) {
+	json::Object out;
+	out["name"] = style.name;
+	out["ass"] = style.GetEntryData();
+	out["font"] = style.font;
+	out["font_size"] = style.fontsize;
+	out["scale_x"] = style.scalex;
+	out["scale_y"] = style.scaley;
+	out["spacing"] = style.spacing;
+	out["angle"] = style.angle;
+	out["outline_width"] = style.outline_w;
+	out["shadow_distance"] = style.shadow_w;
+	out["border_style"] = style.borderstyle;
+	out["alignment"] = style.alignment;
+	out["margin_left"] = style.Margin[0];
+	out["margin_right"] = style.Margin[1];
+	out["margin_vertical"] = style.Margin[2];
+	out["encoding"] = style.encoding;
+	out["bold"] = style.bold;
+	out["italic"] = style.italic;
+	out["underline"] = style.underline;
+	out["strikeout"] = style.strikeout;
+	out["primary_color"] = style.primary.GetAssStyleFormatted();
+	out["secondary_color"] = style.secondary.GetAssStyleFormatted();
+	out["outline_color"] = style.outline.GetAssStyleFormatted();
+	out["shadow_color"] = style.shadow.GetAssStyleFormatted();
+	return out;
+}
+
+void PatchStyle(AssStyle& style, json::Object const& patch) {
+	Keys(patch, {"font", "font_size", "scale_x", "scale_y", "spacing", "angle", "outline_width", "shadow_distance",
+		"bold", "italic", "underline", "strikeout", "border_style", "alignment", "margin_left", "margin_right",
+		"margin_vertical", "encoding", "primary_color", "secondary_color", "outline_color", "shadow_color"});
+	for (auto const& [key, value] : patch) {
+		if (key == "font") style.font = StyleName(value);
+		else if (key == "font_size") style.fontsize = Number(value, 1, 1000);
+		else if (key == "scale_x") style.scalex = Number(value, 0, 1000);
+		else if (key == "scale_y") style.scaley = Number(value, 0, 1000);
+		else if (key == "spacing") style.spacing = Number(value, -1000, 1000);
+		else if (key == "angle") style.angle = Number(value, -3600, 3600);
+		else if (key == "outline_width") style.outline_w = Number(value, 0, 1000);
+		else if (key == "shadow_distance") style.shadow_w = Number(value, 0, 1000);
+		else if (key == "bold") style.bold = static_cast<json::Boolean const&>(value);
+		else if (key == "italic") style.italic = static_cast<json::Boolean const&>(value);
+		else if (key == "underline") style.underline = static_cast<json::Boolean const&>(value);
+		else if (key == "strikeout") style.strikeout = static_cast<json::Boolean const&>(value);
+		else if (key == "border_style") style.borderstyle = int(Integer(value, 1, 4));
+		else if (key == "alignment") style.alignment = int(Integer(value, 1, 9));
+		else if (key == "margin_left") style.Margin[0] = int(Integer(value, 0, 9999));
+		else if (key == "margin_right") style.Margin[1] = int(Integer(value, 0, 9999));
+		else if (key == "margin_vertical") style.Margin[2] = int(Integer(value, 0, 9999));
+		else if (key == "encoding") style.encoding = int(Integer(value, 0, 255));
+		else if (key == "primary_color") style.primary = Color(value);
+		else if (key == "secondary_color") style.secondary = Color(value);
+		else if (key == "outline_color") style.outline = Color(value);
+		else if (key == "shadow_color") style.shadow = Color(value);
+	}
+	if (style.borderstyle != 1 && style.borderstyle != 3 && style.borderstyle != 4)
+		throw std::runtime_error("border_style must be 1, 3, or 4");
+	style.UpdateData();
 }
 
 json::Object Line(AssDialogue const& line, int row, Selection const& selection) {
@@ -175,6 +263,10 @@ json::Object McpBridge::Dispatch(std::string const& method, json::Object const& 
 		result["modified"] = context->subsController->IsModified();
 		result["line_count"] = int64_t(by_id.size());
 		result["write_enabled"] = allow_write;
+		int width, height;
+		context->ass->GetResolution(width, height);
+		result["script_width"] = width;
+		result["script_height"] = height;
 		result["can_undo"] = !context->subsController->IsUndoStackEmpty();
 		result["can_redo"] = !context->subsController->IsRedoStackEmpty();
 		auto active = context->selectionController->GetActiveLine();
@@ -207,19 +299,104 @@ json::Object McpBridge::Dispatch(std::string const& method, json::Object const& 
 	else if (method == "list_styles") {
 		Keys(args, {});
 		json::Array styles;
-		for (auto const& style : context->ass->Styles) {
-			json::Object entry;
-			entry["name"] = style.name;
-			entry["ass"] = style.GetEntryData();
-			styles.emplace_back(std::move(entry));
-		}
+		for (auto const& style : context->ass->Styles) styles.emplace_back(Style(style));
 		result["styles"] = std::move(styles);
 	}
 	else {
 		if (!allow_write) throw std::runtime_error("Read-only session; launch with --allow-write to edit");
 		if (Integer(args.at("expected_revision"), 1, INT64_MAX) != revision)
 			throw std::runtime_error("Document revision conflict; read the document again before editing");
-		if (method == "update_lines") {
+		if (method == "create_lines") {
+			Keys(args, {"expected_revision", "lines", "after_id"});
+			json::Array const& lines = args.at("lines");
+			if (lines.empty() || lines.size() > 500) throw std::runtime_error("Supply 1 to 500 lines");
+			auto position = context->ass->Events.end();
+			if (args.count("after_id")) position = ++context->ass->iterator_to(*lookup(args.at("after_id")));
+			std::vector<std::unique_ptr<AssDialogue>> staged;
+			json::Array ids;
+			Selection selection;
+			for (auto const& item : lines) {
+				json::Object const& patch = item;
+				Keys(patch, {"text", "start_ms", "end_ms", "style", "actor", "effect", "layer", "comment"});
+				// Require explicit content and timing even if a caller bypasses Python validation.
+				String(patch.at("text"));
+				Integer(patch.at("start_ms"), 0, max_time);
+				Integer(patch.at("end_ms"), 0, max_time);
+				auto line = std::make_unique<AssDialogue>();
+				Patch(*line, patch, context->ass.get());
+				if (!context->ass->GetStyle(line->Style.get())) throw std::runtime_error("Unknown style");
+				ids.emplace_back(line->Id);
+				selection.insert(line.get());
+				staged.emplace_back(std::move(line));
+			}
+			auto active = staged.front().get();
+			for (auto& line : staged) context->ass->Events.insert(position, *line.release());
+			context->ass->Commit("MCP: create subtitles", AssFile::COMMIT_DIAG_ADDREM);
+			context->selectionController->SetSelectionAndActive(std::move(selection), active);
+			result["created_ids"] = std::move(ids);
+		}
+		else if (method == "delete_lines") {
+			Keys(args, {"expected_revision", "ids"});
+			json::Array const& ids = args.at("ids");
+			if (ids.empty() || ids.size() > 500) throw std::runtime_error("Supply 1 to 500 subtitle IDs");
+			Selection removed;
+			for (auto const& id : ids)
+				if (!removed.insert(lookup(id)).second) throw std::runtime_error("Duplicate subtitle ID");
+			// Aegisub requires a nonempty document. Allocate its replacement before changing anything.
+			std::unique_ptr<AssDialogue> blank;
+			if (removed.size() == by_id.size()) blank = std::make_unique<AssDialogue>();
+			std::vector<std::unique_ptr<AssDialogue>> retired;
+			retired.reserve(removed.size());
+			// Keep removed objects alive until the grid and active-line listeners finish updating.
+			context->ass->Events.remove_and_dispose_if([&](AssDialogue const& line) {
+				return removed.count(const_cast<AssDialogue *>(&line));
+			}, [&](AssDialogue *line) { retired.emplace_back(line); });
+			if (blank) {
+				result["replacement_id"] = blank->Id;
+				context->ass->Events.push_back(*blank.release());
+			}
+			else result["replacement_id"] = json::Null();
+			auto active = context->selectionController->GetActiveLine();
+			if (!active || removed.count(active)) active = &context->ass->Events.front();
+			auto selection = context->selectionController->GetSelectedSet();
+			for (auto line : removed) selection.erase(line);
+			selection.insert(active);
+			context->ass->Commit("MCP: delete subtitles", AssFile::COMMIT_DIAG_ADDREM);
+			context->selectionController->SetSelectionAndActive(std::move(selection), active);
+			result["deleted"] = int64_t(removed.size());
+		}
+		else if (method == "create_style" || method == "update_style") {
+			bool create = method == "create_style";
+			if (create) Keys(args, {"expected_revision", "name", "properties", "base_style"});
+			else Keys(args, {"expected_revision", "name", "properties"});
+			auto name = StyleName(args.at("name"));
+			json::Object const& properties = args.at("properties");
+			auto current = context->ass->GetStyle(name);
+			std::unique_ptr<AssStyle> staged;
+			if (create) {
+				for (auto const& existing : context->ass->Styles)
+					if (wxString::FromUTF8(existing.name).CmpNoCase(wxString::FromUTF8(name)) == 0)
+						throw std::runtime_error("Style name already exists (case-insensitive)");
+				if (args.count("base_style")) {
+					auto base = context->ass->GetStyle(StyleName(args.at("base_style")));
+					if (!base) throw std::runtime_error("Unknown base style");
+					staged = std::make_unique<AssStyle>(*base);
+				}
+				else staged = std::make_unique<AssStyle>();
+				staged->name = name;
+			}
+			else {
+				if (!current) throw std::runtime_error("Unknown style");
+				if (properties.empty()) throw std::runtime_error("Supply at least one style property");
+				staged = std::make_unique<AssStyle>(*current);
+			}
+			PatchStyle(*staged, properties);
+			result["style"] = Style(*staged);
+			if (create) context->ass->Styles.push_back(*staged.release());
+			else *current = *staged;
+			context->ass->Commit(create ? "MCP: create style" : "MCP: update style", AssFile::COMMIT_STYLES);
+		}
+		else if (method == "update_lines") {
 			Keys(args, {"expected_revision", "updates"});
 			json::Array const& updates = args.at("updates");
 			if (updates.empty() || updates.size() > 500) throw std::runtime_error("Supply 1 to 500 updates");

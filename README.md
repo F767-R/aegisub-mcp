@@ -4,7 +4,9 @@
 
 This fork adds opt-in, local Model Context Protocol support for the live Aegisub
 window: read subtitles and styles, edit text and metadata, shift timing, select
-lines, and Undo/Redo. Edits are revision-checked and participate in normal Undo.
+lines, create/delete subtitle lines, create/edit styles, and Undo/Redo. Edits are
+revision-checked and participate in normal Undo. The assistant can build layered
+ASS effects using new lines, styles, and override tags.
 
 See **[MCP setup and usage](docs/mcp.md)**. The integration consists of a native
 bridge in this fork plus a Python stdio server in `mcp/`. An upstream Aegisub
@@ -15,8 +17,9 @@ installer and portable ZIP. The portable package includes the MCP server and
 `setup-mcp.cmd` (Python 3.11+ required for MCP). Windows releases are published
 only after the packaged application passes the native MCP integration tests.
 
-The initial integration does not add/delete lines, edit style definitions, open
-media, execute Lua, or save files remotely. Save and review changes in the GUI.
+See **[Windows build and monitoring instructions](docs/build-mcp-windows.md)**.
+MCP does not open media, execute Lua, rename/delete styles, or save files remotely.
+Save and review changes in the GUI.
 
 ---
 

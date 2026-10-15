@@ -131,5 +131,5 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "This commit already has a release; preserving its assets."
           else
-            gh release create "$tag" release/* --target "$BUILD_SHA" --prerelease --title "Aegisub MCP Windows x64 (${BUILD_SHA:0:7})" --notes "Windows x64 installer and portable package with the native MCP bridge. The portable package includes the Python MCP server and setup-mcp.cmd (Python 3.11+ required). See MCP-README.md in the package for setup. Native unit tests and all 28 MCP tests passed against the packaged Windows application. Unsigned community prerelease. SHA256SUMS.txt covers the downloadable assets."
+            gh release create "$tag" release/* --target "$BUILD_SHA" --prerelease --title "Aegisub MCP Windows x64 (${BUILD_SHA:0:7})" --notes "Windows x64 installer and portable package with the native MCP bridge. The portable package includes the Python MCP server and setup-mcp.cmd (Python 3.11+ required). See MCP-README.md in the package for setup. Native unit tests and the full MCP test suite passed against the packaged Windows application. Unsigned community prerelease. SHA256SUMS.txt covers the downloadable assets."
           fi

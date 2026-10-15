@@ -18,9 +18,8 @@ Timestamp = Annotated[int, Field(strict=True, ge=0, le=35999990, multiple_of=10)
 Ids = Annotated[list[LineId], Field(min_length=1, max_length=500)]
 
 
-class LineUpdate(BaseModel):
+class LineFields(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    id: LineId
     text: str | None = Field(default=None, max_length=65536)
     start_ms: Timestamp | None = None
     end_ms: Timestamp | None = None
@@ -33,8 +32,6 @@ class LineUpdate(BaseModel):
     @model_validator(mode="after")
     def check_update(self):
         fields = self.model_fields_set - {"id"}
-        if not fields:
-            raise ValueError("Supply at least one field to change")
         for name in fields:
             value = getattr(self, name)
             if value is None:
@@ -49,6 +46,69 @@ class LineUpdate(BaseModel):
         return self
 
 
+class LineUpdate(LineFields):
+    id: LineId
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if not self.model_fields_set - {"id"}:
+            raise ValueError("Supply at least one field to change")
+        return self
+
+
+class LineCreate(LineFields):
+    text: str = Field(max_length=65536)
+    start_ms: Timestamp
+    end_ms: Timestamp
+    style: str = Field(default="Default", max_length=65536)
+
+
+StyleName = Annotated[str, Field(min_length=1, max_length=256)]
+AssColor = Annotated[str, Field(pattern=r"^&H[0-9A-Fa-f]{8}$")]
+
+
+def validate_style_name(name: str) -> str:
+    if name != name.strip() or any(c in name for c in ",\r\n\0") or len(name.encode("utf-8")) > 256:
+        raise ValueError("Style names must be trimmed, at most 256 UTF-8 bytes, and contain no commas or line breaks")
+    return name
+
+
+class StyleProperties(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    font: str | None = Field(default=None, min_length=1, max_length=256)
+    font_size: float | None = Field(default=None, ge=1, le=1000)
+    primary_color: AssColor | None = None
+    secondary_color: AssColor | None = None
+    outline_color: AssColor | None = None
+    shadow_color: AssColor | None = None
+    bold: bool | None = None
+    italic: bool | None = None
+    underline: bool | None = None
+    strikeout: bool | None = None
+    scale_x: float | None = Field(default=None, ge=0, le=1000)
+    scale_y: float | None = Field(default=None, ge=0, le=1000)
+    spacing: float | None = Field(default=None, ge=-1000, le=1000)
+    angle: float | None = Field(default=None, ge=-3600, le=3600)
+    border_style: Annotated[int, Field(ge=1, le=4)] | None = None
+    outline_width: float | None = Field(default=None, ge=0, le=1000)
+    shadow_distance: float | None = Field(default=None, ge=0, le=1000)
+    alignment: Annotated[int, Field(ge=1, le=9)] | None = None
+    margin_left: Annotated[int, Field(ge=0, le=9999)] | None = None
+    margin_right: Annotated[int, Field(ge=0, le=9999)] | None = None
+    margin_vertical: Annotated[int, Field(ge=0, le=9999)] | None = None
+    encoding: Annotated[int, Field(ge=0, le=255)] | None = None
+
+    @model_validator(mode="after")
+    def check_properties(self):
+        if any(getattr(self, name) is None for name in self.model_fields_set):
+            raise ValueError("Omit unchanged properties instead of supplying null")
+        if self.font is not None:
+            validate_style_name(self.font)
+        if self.border_style == 2:
+            raise ValueError("border_style must be 1, 3, or 4")
+        return self
+
+
 def create_server(bridge: Bridge) -> FastMCP:
     server = FastMCP("Aegisub", instructions=(
         "Control the Aegisub window launched for this session. Read the document before editing. "
@@ -58,10 +118,11 @@ def create_server(bridge: Bridge) -> FastMCP:
     ))
     read = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
     write = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
+    delete = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False)
 
     @server.tool(annotations=read)
     async def get_document() -> dict:
-        """Get revision, filename, dirty state, line count, selection and Undo/Redo availability."""
+        """Get revision, filename, script width/height, dirty state, line count, selection and Undo/Redo availability."""
         return await bridge.call("get_document")
 
     @server.tool(annotations=read)
@@ -78,10 +139,60 @@ def create_server(bridge: Bridge) -> FastMCP:
 
     @server.tool(annotations=read)
     async def list_styles() -> dict:
-        """Read available style names and their complete ASS definitions."""
+        """Read available style names, structured properties, and their complete ASS definitions."""
         return await bridge.call("list_styles")
 
     if bridge.allow_write:
+        @server.tool(annotations=write)
+        async def create_lines(expected_revision: Revision,
+                               lines: Annotated[list[LineCreate], Field(min_length=1, max_length=500)],
+                               after_id: LineId | None = None) -> dict:
+            """Create 1-500 lines in one Undo step; return their IDs in input order and select them.
+
+            Omit after_id to append, or insert after an existing ID. Use layers and ASS override
+            tags in text for effects. Times and text are required; style defaults to Default.
+            """
+            args = dict(expected_revision=expected_revision,
+                        lines=[line.model_dump(exclude_none=True) for line in lines])
+            if after_id is not None:
+                args["after_id"] = after_id
+            return await bridge.call("create_lines", args)
+
+        @server.tool(annotations=delete)
+        async def delete_lines(expected_revision: Revision, ids: Ids) -> dict:
+            """Delete specified IDs in one Undo step. Re-read IDs after Undo/Redo.
+
+            If all lines are deleted, Aegisub keeps one blank line; its ID is returned.
+            """
+            return await bridge.call("delete_lines", dict(expected_revision=expected_revision, ids=ids))
+
+        @server.tool(annotations=write)
+        async def create_style(expected_revision: Revision, name: StyleName,
+                               properties: StyleProperties, base_style: StyleName | None = None) -> dict:
+            """Create a named style in one Undo step, optionally copying an existing style first.
+
+            Use {} for default properties. Colors use ASS &HAABBGGRR (AA=00 opaque, FF transparent).
+            Style names must be unique ignoring case. Border styles: 1 outline, 3 box, 4 libass shadow box.
+            """
+            args = dict(expected_revision=expected_revision, name=validate_style_name(name),
+                        properties=properties.model_dump(exclude_unset=True))
+            if base_style is not None:
+                args["base_style"] = validate_style_name(base_style)
+            return await bridge.call("create_style", args)
+
+        @server.tool(annotations=write)
+        async def update_style(expected_revision: Revision, name: StyleName,
+                               properties: StyleProperties) -> dict:
+            """Edit an existing style in one Undo step, affecting every line using it.
+
+            Supply only changed properties. Colors use ASS &HAABBGGRR; AA=00 opaque, FF transparent.
+            This does not rename the style. Create a new style for independent effect layers.
+            """
+            if not properties.model_fields_set:
+                raise ValueError("Supply at least one style property to change")
+            return await bridge.call("update_style", dict(expected_revision=expected_revision,
+                                     name=validate_style_name(name), properties=properties.model_dump(exclude_unset=True)))
+
         @server.tool(annotations=write)
         async def update_lines(expected_revision: Revision,
                                updates: Annotated[list[LineUpdate], Field(min_length=1, max_length=500)]) -> dict:

@@ -15,7 +15,8 @@ import uuid
 MAX_REQUEST = 4 * 1024 * 1024
 MAX_RESPONSE = 64 * 1024 * 1024
 READ_METHODS = frozenset({"get_document", "list_lines", "list_styles"})
-WRITE_METHODS = frozenset({"update_lines", "shift_times", "select_lines", "undo", "redo"})
+WRITE_METHODS = frozenset({"update_lines", "create_lines", "delete_lines", "create_style", "update_style",
+                           "shift_times", "select_lines", "undo", "redo"})
 
 
 class BridgeError(RuntimeError):

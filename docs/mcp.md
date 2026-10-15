@@ -10,6 +10,11 @@ calling tools.
 
 ## Setup
 
+Line creation/deletion and style creation/editing require the **0.2.0 server and
+matching native build**. Older Windows releases do not contain these tools.
+See [Windows build and monitoring instructions](build-mcp-windows.md) to build
+the current branch and follow its progress yourself.
+
 ### Windows downloads
 
 Download the **Windows x64 portable ZIP** from this fork's
@@ -83,9 +88,13 @@ assets include SHA-256 checksums. Python is required for MCP, not ordinary editi
 
 | Tool | Purpose |
 | --- | --- |
-| `get_document` | Revision, filename, unsaved state, line count, active line, selection, Undo/Redo availability |
+| `get_document` | Revision, filename, unsaved state, script width/height, line count, active line, selection, Undo/Redo availability |
 | `list_lines` | Paginated subtitle text, timestamps, metadata, IDs and selection |
-| `list_styles` | Style names and full ASS definitions |
+| `list_styles` | Style names, structured properties, and full ASS definitions |
+| `create_lines` | Insert/append up to 500 new lines; return IDs in input order and select them |
+| `delete_lines` | Delete up to 500 IDs; preserve one blank line if the whole document is cleared |
+| `create_style` | Create a uniquely named style, optionally cloning an existing style |
+| `update_style` | Change supplied properties of an existing style, affecting all lines using it |
 | `update_lines` | Validate and apply up to 500 edits in one Undo step |
 | `shift_times` | Shift start/end times for up to 500 IDs in one Undo step |
 | `select_lines` | Select IDs and choose the active subtitle |
@@ -115,6 +124,63 @@ Times are milliseconds in multiples of 10 (ASS precision), from 0 through
 Use ASS `\N` instead of literal newlines; commas are forbidden in ASS metadata.
 Styles must already exist. Duplicate IDs and invalid batches are rejected before
 the document is changed.
+
+## Creating effects
+
+1. Read `get_document`, `list_lines`, and `list_styles`. Use `script_width` and
+   `script_height` when calculating positions for ASS tags.
+2. Call `create_style` for a new effect style. An optional `base_style` copies
+   an existing style; otherwise Aegisub's default style properties are used.
+3. Call `create_lines` with explicit `text`, `start_ms`, and `end_ms` for every
+   line. `style` defaults to `Default`; `layer`, `actor`, `effect`, and `comment`
+   are optional. Omit `after_id` to append, or supply an existing ID to insert
+   immediately after it. The input order is preserved.
+4. Combine ASS tags such as `\blur`, `\fad`, `\move`, `\t`, and `\k` in text
+   with multiple layers. Preview in Aegisub. Keep the returned `created_ids` if
+   you want to remove the generated lines using `delete_lines`.
+
+Example `create_style` arguments (substitute a current revision):
+
+```json
+{
+  "expected_revision": 7,
+  "name": "Glow",
+  "base_style": "Default",
+  "properties": {"primary_color": "&H0000FFFF", "outline_width": 6, "font_size": 60}
+}
+```
+
+Then call `create_lines` with the revision returned by that call:
+
+```json
+{
+  "expected_revision": 8,
+  "lines": [
+    {"text": "{\\blur6\\fad(300,500)}Hello", "start_ms": 1000, "end_ms": 3000, "style": "Glow", "layer": 0},
+    {"text": "{\\bord0\\fad(300,500)}Hello", "start_ms": 1000, "end_ms": 3000, "style": "Glow", "layer": 1}
+  ]
+}
+```
+
+Style properties include `font`, `font_size`, the four `*_color` fields,
+`bold`, `italic`, `underline`, `strikeout`, `scale_x`, `scale_y`, `spacing`,
+`angle`, `border_style`, `outline_width`, `shadow_distance`, `alignment`,
+`margin_left`, `margin_right`, `margin_vertical`, and `encoding`.
+Colors use **ASS `&HAABBGGRR`**, with `AA=00` opaque and `AA=FF` transparent.
+For example, opaque red is `&H000000FF` and opaque yellow is `&H0000FFFF`.
+Border styles are 1 (outline), 3 (opaque box), or 4 (libass shadow box).
+The tool schema specifies numeric bounds. Style/font names must be nonempty,
+trimmed, at most 256 UTF-8 bytes, and contain no commas or line breaks. New
+style names must be unique ignoring case. `update_style` uses the exact existing
+name and requires at least one property; it does not rename styles. Use a newly
+created style to avoid changing other subtitles that share an existing style.
+
+Each create, update, or delete call is one Undo step. A multi-call effect is
+therefore several Undo steps. Invalid line batches apply nothing. Deleting all
+lines leaves one empty line, whose ID is returned as `replacement_id`; otherwise
+that field is null. Re-read after Undo/Redo or manual edits. The server does not
+evaluate scripts: effect tags are rendered by Aegisub. Lua execution, style
+renaming/deletion, media opening, and remote saving are not exposed.
 
 ## Lifecycle and local access
 
