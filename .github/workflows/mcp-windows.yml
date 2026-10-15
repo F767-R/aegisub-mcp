@@ -3,7 +3,7 @@ name: MCP Windows release
 on:
   push:
     branches: [mcp-support]
-    paths: ['src/**', 'libaegisub/**', 'mcp/**', 'meson.build', 'meson_options.txt', 'subprojects/**', 'tools/mcp-*', '.github/workflows/mcp-windows.yml']
+    paths: ['src/**', 'libaegisub/**', 'mcp/**', 'meson.build', 'meson_options.txt', 'subprojects/**', 'tools/mcp-*', 'tools/version.ps1', '.github/workflows/mcp-windows.yml']
   workflow_dispatch:
 
 permissions:
@@ -22,6 +22,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Restore native build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build
+            subprojects
+          key: windows-msvc-native-v1-${{ hashFiles('subprojects/*.wrap', 'meson.build') }}-${{ github.sha }}
+          restore-keys: windows-msvc-native-v1-${{ hashFiles('subprojects/*.wrap', 'meson.build') }}-
       - name: Install build tools
         env:
           GH_TOKEN: ${{ github.token }}
@@ -42,12 +50,25 @@ jobs:
         run: |
           Import-Module "$env:VS\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $env:VS -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          meson setup build -Dbuildtype=release -Ddefault_library=static --force-fallback-for=zlib,harfbuzz,freetype2,fribidi -Dfallback_nasm=true -Dfreetype2:harfbuzz=disabled -Dharfbuzz:freetype=disabled -Dharfbuzz:cairo=disabled -Dharfbuzz:glib=disabled -Dharfbuzz:gobject=disabled -Dharfbuzz:tests=disabled -Dharfbuzz:docs=disabled -Dfribidi:tests=false -Dfribidi:docs=false -Dlibass:fontconfig=disabled
+          $configureArgs = @()
+          if (Test-Path build/build.ninja) { $configureArgs += '--reconfigure' }
+          meson setup build @configureArgs -Dbuildtype=release -Ddefault_library=static --force-fallback-for=zlib,harfbuzz,freetype2,fribidi -Dfallback_nasm=true -Dfreetype2:harfbuzz=disabled -Dharfbuzz:freetype=disabled -Dharfbuzz:cairo=disabled -Dharfbuzz:glib=disabled -Dharfbuzz:gobject=disabled -Dharfbuzz:tests=disabled -Dharfbuzz:docs=disabled -Dfribidi:tests=false -Dfribidi:docs=false -Dlibass:fontconfig=disabled
           if ($LASTEXITCODE) { throw 'Meson configuration failed' }
+          ./tools/version.ps1 build
+          $versionHeader = Get-Content build/git_version.h -Raw
+          if ($versionHeader -notmatch '#define RESOURCE_BASE_VERSION\s+\d+,\s*\d+,\s*\d+') { throw 'Missing Windows resource version' }
           meson compile -C build
           if ($LASTEXITCODE) { throw 'Windows compilation failed' }
           meson test -C build --verbose --suite Aegisub
           if ($LASTEXITCODE) { throw 'Native unit tests failed' }
+      - name: Save native build cache before packaging
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build
+            subprojects
+          key: windows-msvc-native-v1-${{ hashFiles('subprojects/*.wrap', 'meson.build') }}-${{ github.sha }}
       - name: Package installer and portable application
         env:
           GITHUB_TOKEN: ${{ github.token }}
