@@ -10,6 +10,25 @@ calling tools.
 
 ## Setup
 
+### Windows downloads
+
+Download the **Windows x64 portable ZIP** from this fork's
+[Releases page](https://github.com/F767-R/aegisub-mcp/releases). Extract it to a
+writable folder and double-click `aegisub.exe` for ordinary editing. For MCP,
+install Python 3.11 or newer with `python` on PATH, then run `setup-mcp.cmd` in
+the extracted folder. Setup downloads the Python dependencies into a local
+`.venv` and generates `mcp-config.json`; copy its server entry into your MCP
+client. Keep the folder in place because the configuration uses absolute paths.
+The generated entry enables editing; remove `--allow-write` for read-only use.
+
+The installer EXE is also available, but it installs only the native application.
+To use it with MCP, install `mcp/` from the matching source ZIP as below and point
+`--aegisub` to the installed executable. Releases are unsigned community builds.
+`BUILD-INFO.txt` in the portable package records the source commit, and release
+assets include SHA-256 checksums. Python is required for MCP, not ordinary editing.
+
+### Build from source and configure manually
+
 1. Build **this fork**, using the platform instructions in the root README.
    On Windows, install Visual Studio's **Desktop development with C++** workload,
    including a Windows SDK. Use an x64 Developer Command Prompt:
@@ -147,5 +166,9 @@ AEGISUB_MCP_TEST_EXE="$PWD/build/aegisub" xvfb-run -a python -m pytest mcp/tests
 These tests launch disposable fixture windows, verify edits, batch rejection,
 revision conflicts, selection, timing, Undo/Redo, token checks and read-only
 enforcement, then terminate only those fixture processes. CI builds the native
-Linux application and runs these tests. See the Actions results for build status;
-the existence of this source is not itself evidence of a successful native build.
+Linux application and runs these tests. The `MCP Windows release` workflow builds
+the Windows x64 application, runs native unit tests and all MCP tests against the
+packaged executable, and publishes a prerelease only after those checks pass.
+It can also be run manually from Actions. Windows packaging follows the upstream
+MSVC release configuration, including normal audio/video support, translations,
+and Automation scripts. See the workflow for the complete build arguments.

@@ -10,6 +10,11 @@ See **[MCP setup and usage](docs/mcp.md)**. The integration consists of a native
 bridge in this fork plus a Python stdio server in `mcp/`. An upstream Aegisub
 binary does not contain the bridge. Normal launches leave MCP disabled.
 
+**[Windows x64 downloads](https://github.com/F767-R/aegisub-mcp/releases)**:
+installer and portable ZIP. The portable package includes the MCP server and
+`setup-mcp.cmd` (Python 3.11+ required for MCP). Windows releases are published
+only after the packaged application passes the native MCP integration tests.
+
 The initial integration does not add/delete lines, edit style definitions, open
 media, execute Lua, or save files remotely. Save and review changes in the GUI.
 
