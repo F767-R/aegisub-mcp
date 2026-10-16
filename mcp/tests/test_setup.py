@@ -17,6 +17,19 @@ setup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(setup)
 
 
+@pytest.mark.parametrize("packaged", [False, True])
+def test_desktop_config_path_handles_store_installation(tmp_path, monkeypatch, packaged):
+    roaming = tmp_path / "Roaming"
+    local = tmp_path / "Local"
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    store = local / "Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude"
+    if packaged:
+        store.mkdir(parents=True)
+    expected = store if packaged else roaming / "Claude"
+    assert setup.desktop_config_path() == expected / "claude_desktop_config.json"
+
+
 def test_desktop_merge_backup_and_idempotency(tmp_path):
     destination = tmp_path / "Claude/claude_desktop_config.json"
     destination.parent.mkdir()
@@ -97,6 +110,7 @@ def test_desktop_cli_reuses_environment_without_install(tmp_path, monkeypatch):
     (root / "aegisub.exe").touch()
     appdata = tmp_path / "Roaming"
     monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     monkeypatch.setattr(setup, "__file__", str(root / "setup-mcp.py"))
     monkeypatch.setattr(sys, "argv", ["setup-mcp.py", "--claude-desktop", "--skip-install", "--read-only"])
     commands = []

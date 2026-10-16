@@ -11,6 +11,20 @@ import time
 import venv
 
 
+def desktop_config_path():
+    """Store-packaged Claude redirects its roaming data into LocalCache."""
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        packaged = (Path(local) / "Packages" / "Claude_pzs8sxrjxfjjc" /
+                    "LocalCache" / "Roaming" / "Claude")
+        if packaged.is_dir():
+            return packaged / "claude_desktop_config.json"
+    roaming = os.environ.get("APPDATA")
+    if not roaming:
+        raise ValueError("APPDATA is missing. Run setup as your Windows user, without administrator privileges.")
+    return Path(roaming) / "Claude" / "claude_desktop_config.json"
+
+
 def configure_desktop(destination, server=None):
     """Merge or remove only Aegisub, backing up existing settings before replacement."""
     original = destination.read_bytes() if destination.exists() else None
@@ -63,9 +77,7 @@ def main():
         raise SystemExit("Python 3.11 or newer is required.")
     desktop_path = None
     if options.claude_desktop or options.remove_claude_desktop:
-        if not os.environ.get("APPDATA"):
-            raise SystemExit("APPDATA is missing. Run setup as your Windows user, without administrator privileges.")
-        desktop_path = Path(os.environ["APPDATA"]) / "Claude" / "claude_desktop_config.json"
+        desktop_path = desktop_config_path()
     if options.remove_claude_desktop:
         backup = configure_desktop(desktop_path)
         print(f"Aegisub disconnected in {desktop_path}. Fully quit and reopen Claude Desktop.")

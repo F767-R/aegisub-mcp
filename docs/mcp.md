@@ -42,7 +42,10 @@ Open your subtitle file in the Aegisub window that Claude launches.
 
 Setup merges only `mcpServers.aegisub` into
 `%APPDATA%\Claude\claude_desktop_config.json`, preserving other servers and
-preferences. An existing Aegisub entry is replaced; changed settings receive a
+preferences. For the Microsoft Store installation, setup detects its data folder
+and uses `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
+instead. If checking manually, Settings > Developer > Edit Config opens the file
+used by your installation. An existing Aegisub entry is replaced; changed settings receive a
 timestamped `.bak` copy first. Invalid settings are rejected without overwriting
 them. Run setup as your regular Windows user, without administrator privileges.
 For read-only access, run `setup-claude-desktop.cmd --read-only` from a terminal.
