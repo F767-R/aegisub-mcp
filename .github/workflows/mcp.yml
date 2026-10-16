@@ -3,7 +3,7 @@ on:
   push:
     branches: [mcp-support]
   pull_request:
-    paths: ['mcp/**', 'src/mcp_bridge.*', 'src/frame_main.*', '.github/workflows/mcp.yml']
+    paths: ['mcp/**', 'tools/mcp-*', 'src/mcp_bridge.*', 'src/frame_main.*', '.github/workflows/mcp.yml']
   workflow_dispatch:
 permissions:
   contents: read

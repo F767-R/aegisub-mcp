@@ -24,6 +24,8 @@ Copy-Item (Join-Path $sourceRoot 'LICENCE') (Join-Path $portable 'LICENCE')
 Copy-Item (Join-Path $sourceRoot 'packages/win_installer/license.txt') (Join-Path $portable 'THIRD-PARTY-LICENSES.txt')
 Copy-Item (Join-Path $PSScriptRoot 'mcp-setup-windows.cmd') (Join-Path $portable 'setup-mcp.cmd')
 Copy-Item (Join-Path $PSScriptRoot 'mcp-setup-windows.py') (Join-Path $portable 'setup-mcp.py')
+Copy-Item (Join-Path $PSScriptRoot 'mcp-setup-claude-desktop.cmd') (Join-Path $portable 'setup-claude-desktop.cmd')
+Copy-Item (Join-Path $PSScriptRoot 'mcp-start-claude-code.cmd') (Join-Path $portable 'start-claude-code.cmd')
 $revision = (git -C $sourceRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE) { throw 'Cannot determine source revision' }
 "Source: https://github.com/F767-R/aegisub-mcp/tree/$revision`nCommit: $revision`nArchitecture: Windows x64`nUnsigned community build" | Set-Content (Join-Path $portable 'BUILD-INFO.txt')

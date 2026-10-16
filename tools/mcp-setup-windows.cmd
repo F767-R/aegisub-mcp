@@ -1,8 +1,12 @@
 @echo off
 cd /d "%~dp0"
-python setup-mcp.py
+if exist ".venv\Scripts\python.exe" (
+  ".venv\Scripts\python.exe" setup-mcp.py %*
+) else (
+  python setup-mcp.py %*
+)
 if errorlevel 1 (
-  echo Setup failed. Install Python 3.11 or newer and ensure python is on PATH.
+  echo Setup failed. See the error above. Initial setup requires Python 3.11 or newer on PATH.
   pause
   exit /b 1
 )

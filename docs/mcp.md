@@ -32,6 +32,51 @@ To use it with MCP, install `mcp/` from the matching source ZIP as below and poi
 `BUILD-INFO.txt` in the portable package records the source commit, and release
 assets include SHA-256 checksums. Python is required for MCP, not ordinary editing.
 
+### Claude Desktop (Windows)
+
+Install and run Claude Desktop, then fully quit it (including the system tray).
+In the portable folder, double-click **`setup-claude-desktop.cmd`**. It installs
+the server if needed, or reuses the environment from `setup-mcp.cmd`. Reopen
+Claude Desktop and ask: "Use Aegisub's get_document tool, then list its styles."
+Open your subtitle file in the Aegisub window that Claude launches.
+
+Setup merges only `mcpServers.aegisub` into
+`%APPDATA%\Claude\claude_desktop_config.json`, preserving other servers and
+preferences. An existing Aegisub entry is replaced; changed settings receive a
+timestamped `.bak` copy first. Invalid settings are rejected without overwriting
+them. Run setup as your regular Windows user, without administrator privileges.
+For read-only access, run `setup-claude-desktop.cmd --read-only` from a terminal.
+
+Claude Desktop may start configured servers when it opens. To disconnect Aegisub
+and prevent it reopening, fully quit Claude, run
+`setup-mcp.cmd --remove-claude-desktop`, then reopen Claude. This removes only its
+Aegisub entry. It does not close a running Aegisub window or save your subtitles.
+Save your work yourself before closing the window.
+
+### Claude Code (Windows)
+
+Install Claude Code separately and run `setup-mcp.cmd` once. From your subtitle
+project's terminal, run the portable folder's **`start-claude-code.cmd`**, or:
+
+```powershell
+claude --mcp-config 'D:\path\to\aegisub-portable\mcp-config.json'
+```
+
+The launcher preserves the current project directory and supplies the generated
+configuration for that session. It does not register Aegisub globally or change
+Claude Code settings. Use `/mcp` in Claude Code to check the connection and allow
+requested tools. Start ordinary sessions with `claude` when you do not want
+Aegisub. See the official [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+and [Claude Desktop MCP guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers).
+
+Both clients use the same reading, subtitle/timing/style editing, effect creation,
+selection, and Undo/Redo tools as other MCP hosts. Each connection launches its
+own Aegisub process; Claude cannot take over a window already launched by Codex.
+Open the saved `.ass` file in Claude's window and press Ctrl+S to save edits.
+The Aegisub bridge does not need an Anthropic API key; authenticate with your
+Claude client as usual. Local stdio requires Claude Desktop or local Claude Code,
+rather than a browser-only chat at claude.ai.
+
 ### Build from source and configure manually
 
 1. Build **this fork**, using the platform instructions in the root README.
