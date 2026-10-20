@@ -403,14 +403,6 @@ void McpBridge::Notify() {
 json::Object McpBridge::Dispatch(std::string const& method, json::Object const& args) {
 	json::Object result;
 	auto const& events = context->ass->Events;
-	std::map<int, AssDialogue *> by_id;
-	for (auto& line : context->ass->Events) by_id.emplace(line.Id, &line);
-	auto lookup = [&](json::UnknownElement const& value) {
-		int id = int(Integer(value, 0, 2147483647));
-		auto it = by_id.find(id);
-		if (it == by_id.end()) throw std::runtime_error("Unknown subtitle ID; read the document again");
-		return it->second;
-	};
 	if (method == "get_context") {
 		Keys(args, {});
 		return Context();
@@ -448,7 +440,7 @@ json::Object McpBridge::Dispatch(std::string const& method, json::Object const& 
 		Keys(args, {});
 		result["filename"] = context->subsController->Filename().string();
 		result["modified"] = context->subsController->IsModified();
-		result["line_count"] = int64_t(by_id.size());
+		result["line_count"] = int64_t(std::distance(events.begin(), events.end()));
 		result["write_enabled"] = allow_write;
 		int width, height;
 		context->ass->GetResolution(width, height);
@@ -493,6 +485,16 @@ json::Object McpBridge::Dispatch(std::string const& method, json::Object const& 
 		if (!allow_write) throw std::runtime_error("Read-only session; launch with --allow-write to edit");
 		if (Integer(args.at("expected_revision"), 1, INT64_MAX) != revision)
 			throw std::runtime_error("Document revision conflict; read the document again before editing");
+		// Live context is published during playback. Build the ID lookup only for
+		// mutation requests, rather than allocating a document-sized map each tick.
+		std::map<int, AssDialogue *> by_id;
+		for (auto& line : context->ass->Events) by_id.emplace(line.Id, &line);
+		auto lookup = [&](json::UnknownElement const& value) {
+			int id = int(Integer(value, 0, 2147483647));
+			auto it = by_id.find(id);
+			if (it == by_id.end()) throw std::runtime_error("Unknown subtitle ID; read the document again");
+			return it->second;
+		};
 		if (method == "seek_video") {
 			Keys(args, {"expected_revision", "time_ms"});
 			auto time = int(Integer(args.at("time_ms"), 0, max_time));
