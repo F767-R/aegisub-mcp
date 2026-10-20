@@ -3,11 +3,14 @@
 Only disposable fixture instances are terminated by these tests.
 """
 import os
+import base64
+import struct
 from pathlib import Path
 
 import pytest
 
 from aegisub_mcp.bridge import BridgeError, LaunchedSession
+from aegisub_mcp.sessions import SessionManager
 
 EXE = os.environ.get("AEGISUB_MCP_TEST_EXE")
 pytestmark = pytest.mark.skipif(not EXE, reason="Native fork executable not supplied")
@@ -68,13 +71,64 @@ async def test_native_token_and_read_only_enforced():
         document = await session.bridge.call("get_document")
         # Bypass the Python policy to exercise the native guard independently.
         session.bridge.allow_write = True
-        for method in ("undo", "create_lines", "delete_lines", "create_style", "update_style"):
+        for method in ("undo", "create_lines", "delete_lines", "create_style", "update_style",
+                       "seek_video", "play_audio", "stop_playback"):
             with pytest.raises(BridgeError, match="Read-only"):
                 await session.bridge.call(method, dict(expected_revision=document["revision"]))
         session.bridge.token = "wrong-token"
         with pytest.raises(BridgeError, match="session token"):
             await session.bridge.call("get_document")
     finally:
+        session.process.terminate()
+        session.process.wait(timeout=10)
+        session.close()
+
+
+async def test_native_reconnect_context_and_rendered_preview(tmp_path):
+    # CI enables loading fixture-linked media. The dummy provider needs no codecs
+    # or external files and has matching script/video resolution to avoid prompts.
+    fixture = tmp_path / "preview.ass"
+    source = FIXTURE.read_text(encoding="utf-8")
+    source = source.replace("PlayResY: 1080", "PlayResY: 1080\nLayoutResX: 1920\nLayoutResY: 1080\nYCbCr Matrix: None")
+    source = source.replace("[V4+ Styles]", "[Aegisub Project Garbage]\nVideo File: ?dummy:25:250:1920:1080:0:0:0:\n\n[V4+ Styles]")
+    fixture.write_text(source, encoding="utf-8")
+    session = LaunchedSession(Path(EXE), fixture, True)
+    session.bridge.timeout = 60
+    manager = SessionManager(True, session.directory.parent)
+    try:
+        context = await session.bridge.call("get_context")
+        assert context["video_loaded"]
+        assert context["video_width"] == 1920
+        with pytest.raises(BridgeError, match="another MCP client"):
+            manager.connect(session.directory.name)
+        first = (await session.bridge.call("list_lines", dict(offset=0, limit=100, selected_only=False)))["lines"][0]["id"]
+        await session.bridge.call("update_lines", dict(expected_revision=context["revision"],
+            updates=[dict(id=first, text=r"{\pos(960,540)\fs120}LIVE PREVIEW")]))
+        current = await session.bridge.call("get_context")
+        arguments = dict(time_ms=1500, max_width=320, max_height=180, raw=False)
+        rendered = await session.bridge.call("render_preview", arguments)
+        raw = await session.bridge.call("render_preview", dict(arguments, raw=True))
+        png = base64.b64decode(rendered["png_base64"])
+        assert png[:8] == b"\x89PNG\r\n\x1a\n"
+        assert struct.unpack(">II", png[16:24]) == (320, 180)
+        assert rendered["png_base64"] != raw["png_base64"]
+        after = await session.bridge.call("get_context")
+        assert after["frame"] == current["frame"]  # Preview never seeks or edits.
+        assert after["revision"] == current["revision"]
+        seek = await session.bridge.call("seek_video", dict(expected_revision=after["revision"], time_ms=3000))
+        assert seek["revision"] == after["revision"]
+        assert seek["context_version"] > after["context_version"]
+        assert seek["time_ms"] == 3000
+        session.close()
+        attached = manager.connect(session.directory.name)
+        assert attached["modified"]
+        assert session.process.poll() is None
+        lines = await manager.call("list_lines", dict(offset=0, limit=100, selected_only=False))
+        assert "LIVE PREVIEW" in lines["lines"][0]["text"]
+        manager.close()
+        assert (session.directory / "session.json").is_file()
+    finally:
+        manager.close()
         session.process.terminate()
         session.process.wait(timeout=10)
         session.close()

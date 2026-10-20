@@ -43,12 +43,37 @@
 #include "../include/aegisub/context.h"
 #include "../libresrc/libresrc.h"
 #include "../main.h"
+#include "../mcp_bridge.h"
 #include "../options.h"
 #include "../project.h"
 #include "../utils.h"
 
 namespace {
 	using cmd::Command;
+
+struct app_agent_read final : public Command {
+	CMD_NAME("app/agent/read")
+	STR_MENU("Agent connection: read only")
+	STR_DISP("Enable agent connection (read only)")
+	STR_HELP("Allow a local MCP client to connect to this window without editing")
+	void operator()(agi::Context *c) override { c->frame->GetMcpBridge()->Enable(false); }
+};
+
+struct app_agent_write final : public Command {
+	CMD_NAME("app/agent/write")
+	STR_MENU("Agent connection: allow editing")
+	STR_DISP("Enable agent connection (allow editing)")
+	STR_HELP("Allow a local MCP client to connect and make undoable edits in this window")
+	void operator()(agi::Context *c) override { c->frame->GetMcpBridge()->Enable(true); }
+};
+
+struct app_agent_disconnect final : public Command {
+	CMD_NAME("app/agent/disconnect")
+	STR_MENU("Disconnect agent")
+	STR_DISP("Disconnect agent")
+	STR_HELP("Disable agent access to this window without discarding unsaved work")
+	void operator()(agi::Context *c) override { c->frame->GetMcpBridge()->Disable(); }
+};
 
 struct app_about final : public Command {
 	CMD_NAME("app/about")
@@ -336,6 +361,9 @@ struct app_show_all final : public Command {
 
 namespace cmd {
 	void init_app() {
+		reg(std::make_unique<app_agent_read>());
+		reg(std::make_unique<app_agent_write>());
+		reg(std::make_unique<app_agent_disconnect>());
 		reg(std::make_unique<app_about>());
 		reg(std::make_unique<app_display_audio_subs>());
 		reg(std::make_unique<app_display_full>());

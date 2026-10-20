@@ -58,8 +58,9 @@ def configure_desktop(destination, server=None):
     return backup
 
 
-def server_config(root, read_only=False):
-    args = ["-m", "aegisub_mcp.server", "--aegisub", str(root / "aegisub.exe")]
+def server_config(root, read_only=False, attach=False):
+    args = ["-m", "aegisub_mcp.server"]
+    args += ["--attach"] if attach else ["--aegisub", str(root / "aegisub.exe")]
     if not read_only:
         args.append("--allow-write")
     return {"command": str(root / ".venv" / "Scripts" / "python.exe"), "args": args}
@@ -72,6 +73,7 @@ def main():
     desktop.add_argument("--remove-claude-desktop", action="store_true", help="Disconnect from Claude Desktop")
     parser.add_argument("--skip-install", action="store_true", help="Reuse the existing Python environment")
     parser.add_argument("--read-only", action="store_true", help="Expose only read tools")
+    parser.add_argument("--attach", action="store_true", help="Connect to enabled open windows instead of launching another")
     options = parser.parse_args()
     if sys.version_info < (3, 11):
         raise SystemExit("Python 3.11 or newer is required.")
@@ -98,7 +100,7 @@ def main():
             venv.create(environment, with_pip=True)
         subprocess.run([str(python), "-m", "pip", "install", str(root / "mcp")], check=True)
     subprocess.run([str(python), "-c", "import aegisub_mcp.server"], check=True)
-    server = server_config(root, options.read_only)
+    server = server_config(root, options.read_only, options.attach)
     config = {"mcpServers": {"aegisub": server}}
     destination = root / "mcp-config.json"
     destination.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")

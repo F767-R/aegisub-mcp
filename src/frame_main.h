@@ -84,6 +84,7 @@ class FrameMain : public wxFrame, private agi::signal::ConnectionScope {
 	wxSizer *ToolsSizer; ///< Arranges audio and editing areas top to bottom
 
 public:
+	McpBridge *GetMcpBridge() const { return mcp_bridge.get(); }
 	FrameMain();
 	~FrameMain();
 

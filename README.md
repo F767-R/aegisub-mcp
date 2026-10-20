@@ -8,6 +8,12 @@ lines, create/delete subtitle lines, create/edit styles, and Undo/Redo. Edits ar
 revision-checked and participate in normal Undo. The assistant can build layered
 ASS effects using new lines, styles, and override tags.
 
+Version 0.3 adds opt-in connections to already-open fork windows, live editing
+context and MCP resource subscriptions, rendered PNG previews of unsaved subtitles,
+video seeking, and bounded audio audition. Enable a window in **View > Agent
+connection**, then configure the server with `--attach`. Existing launch-mode
+configuration remains supported. A matching 0.3 native build is required.
+
 See **[MCP setup and usage](docs/mcp.md)**. The integration consists of a native
 bridge in this fork plus a Python stdio server in `mcp/`. An upstream Aegisub
 binary does not contain the bridge. Normal launches leave MCP disabled.

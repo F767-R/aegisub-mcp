@@ -125,6 +125,10 @@
         { "command" : "audio/open/noise" }
     ],
     "main/view" : [
+        { "command" : "app/agent/read" },
+        { "command" : "app/agent/write" },
+        { "command" : "app/agent/disconnect" },
+        {},
         { "command" : "app/language" },
         { "command" : "app/options", "special" : "options" },
         {},

@@ -6,11 +6,18 @@
 #include "ass_dialogue.h"
 #include "ass_file.h"
 #include "ass_style.h"
+#include "async_video_provider.h"
+#include "audio_controller.h"
 #include "frame_main.h"
 #include "include/aegisub/context.h"
 #include "selection_controller.h"
 #include "subs_controller.h"
+#include "time_range.h"
+#include "project.h"
+#include "video_controller.h"
+#include "video_frame.h"
 
+#include <libaegisub/audio/provider.h>
 #include <libaegisub/cajun/writer.h>
 
 #include <algorithm>
@@ -19,14 +26,53 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <vector>
 #include <wx/utils.h>
+#include <wx/base64.h>
+#include <wx/image.h>
+#include <wx/mstream.h>
+#include <wx/stdpaths.h>
 
 namespace {
 constexpr int64_t max_time = 35999990; // ASS: 9:59:59.99
 constexpr size_t max_message = 4 * 1024 * 1024;
+
+agi::fs::path Registry() {
+	wxString root;
+#ifdef _WIN32
+	if (!wxGetEnv("LOCALAPPDATA", &root)) throw std::runtime_error("LOCALAPPDATA is unavailable");
+	return agi::fs::path(root.ToStdWstring()) / "Aegisub" / "mcp-sessions";
+#elif defined(__WXMAC__)
+	return agi::fs::path(wxGetHomeDir().ToStdWstring()) / "Library/Application Support/Aegisub/mcp-sessions";
+#else
+	return agi::fs::path(wxGetHomeDir().ToStdWstring()) / ".local/share/aegisub/mcp-sessions";
+#endif
+}
+
+std::string Secret(size_t bytes) {
+	std::random_device random;
+	std::string out;
+	for (size_t i = 0; i < bytes; ++i) {
+		auto value = random() & 255;
+		out += "0123456789abcdef"[value >> 4];
+		out += "0123456789abcdef"[value & 15];
+	}
+	return out;
+}
+
+void WriteJson(agi::fs::path const& path, json::Object const& value) {
+	auto temp = path;
+	temp += ".tmp";
+	std::ofstream output(temp, std::ios::binary | std::ios::trunc);
+	agi::JsonWriter::Write(value, output);
+	output.close();
+	if (!output) throw std::runtime_error("Could not write agent session state");
+	// agi::fs::Rename replaces the destination atomically on Windows as well.
+	agi::fs::Rename(temp, path);
+}
 
 int64_t Integer(json::UnknownElement const& value, int64_t low, int64_t high) {
 	int64_t n = value;
@@ -175,6 +221,18 @@ void Patch(AssDialogueBase& line, json::Object const& patch, AssFile *ass) {
 }
 
 McpBridge::McpBridge(agi::Context *context) : context(context) {
+	BindConnection(context->ass->AddCommitListener(&McpBridge::Changed, this));
+	BindConnection(context->subsController->AddFileOpenListener(&McpBridge::Changed, this));
+	BindConnection(context->subsController->AddFileSaveListener(&McpBridge::Changed, this));
+	BindConnection(context->selectionController->AddSelectionListener(&McpBridge::ContextChanged, this));
+	BindConnection(context->selectionController->AddActiveLineListener([this](AssDialogue *) { ContextChanged(); }));
+	BindConnection(context->videoController->AddSeekListener([this](int) { ContextChanged(); }));
+	BindConnection(context->project->AddVideoProviderListener([this](AsyncVideoProvider *) { ContextChanged(); }));
+	BindConnection(context->project->AddAudioProviderListener([this](agi::AudioProvider *) { ContextChanged(); }));
+	BindConnection(context->project->AddKeyframesListener([this](std::vector<int> const&) { ContextChanged(); }));
+	BindConnection(context->project->AddTimecodesListener([this](agi::vfr::Framerate const&) { ContextChanged(); }));
+	BindConnection(context->audioController->AddPlaybackPositionListener([this](int) { ContextChanged(); }));
+	BindConnection(context->audioController->AddPlaybackStopListener(&McpBridge::ContextChanged, this));
 	// Additional windows in the same process must never consume this mailbox.
 	static bool claimed = false;
 	if (claimed) return;
@@ -190,21 +248,100 @@ McpBridge::McpBridge(agi::Context *context) : context(context) {
 	wxUnsetEnv("AEGISUB_MCP_DIR");
 	wxUnsetEnv("AEGISUB_MCP_TOKEN");
 	wxUnsetEnv("AEGISUB_MCP_WRITE");
-	BindConnection(context->ass->AddCommitListener(&McpBridge::Changed, this));
-	BindConnection(context->subsController->AddFileOpenListener(&McpBridge::Changed, this));
-	BindConnection(context->subsController->AddFileSaveListener(&McpBridge::Changed, this));
-	Start(50);
-	context->frame->StatusTimeout(allow_write ? "MCP connected (editing enabled)" : "MCP connected (read only)");
+	StartSession();
 }
 
-McpBridge::~McpBridge() { Stop(); }
-void McpBridge::Changed() { ++revision; }
+void McpBridge::StartSession() {
+	json::Object session;
+	session["protocol_version"] = 3;
+	session["session_id"] = directory.filename().string();
+	session["pid"] = int64_t(wxGetProcessId());
+	session["token"] = token;
+	session["write_enabled"] = allow_write;
+	WriteJson(directory / "session.json", session);
+	context_dirty = true;
+	PublishContext();
+	Start(50);
+	context->frame->StatusTimeout(allow_write ? "Agent connection enabled (editing allowed)" : "Agent connection enabled (read only)");
+}
+
+void McpBridge::Enable(bool writable) {
+	// Rotate credentials and directory when changing permissions. Old clients lose access.
+	Disable();
+	auto registry = Registry();
+	std::filesystem::create_directories(registry);
+#ifndef _WIN32
+	std::filesystem::permissions(registry, std::filesystem::perms::owner_all);
+#endif
+	directory = registry / Secret(16);
+	std::filesystem::create_directory(directory);
+#ifndef _WIN32
+	std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
+#endif
+	owns_directory = true;
+	token = Secret(32);
+	allow_write = writable;
+	StartSession();
+}
+
+void McpBridge::Disable() {
+	Stop();
+	if (!directory.empty()) {
+		std::error_code ec;
+		// Only remove bridge-owned files. Never recursively delete a user-supplied directory.
+		for (auto name : {"session.json", "context.json", "request.json", "preview.png"})
+			std::filesystem::remove(directory / name, ec);
+		if (owns_directory) std::filesystem::remove(directory, ec);
+	}
+	directory.clear();
+	token.clear();
+}
+
+McpBridge::~McpBridge() { Disable(); }
+void McpBridge::Changed() { ++revision; ContextChanged(); }
+void McpBridge::ContextChanged() { ++context_version; context_dirty = true; }
+
+json::Object McpBridge::Context() {
+	auto result = Dispatch("get_document", {});
+	result["context_version"] = context_version;
+	result["session_id"] = directory.filename().string();
+	result["video_file"] = context->project->VideoName().string();
+	result["audio_file"] = context->project->AudioName().string();
+	result["video_loaded"] = !!context->project->VideoProvider();
+	result["audio_loaded"] = !!context->project->AudioProvider();
+	result["video_playing"] = context->videoController->IsPlaying();
+	result["audio_playing"] = context->audioController->IsPlaying();
+	if (auto provider = context->project->VideoProvider()) {
+		auto frame = context->videoController->GetFrameN();
+		result["frame"] = frame;
+		result["time_ms"] = context->videoController->TimeAtFrame(frame);
+		result["video_width"] = provider->GetWidth();
+		result["video_height"] = provider->GetHeight();
+		result["frame_count"] = provider->GetFrameCount();
+		auto const& keys = context->project->Keyframes();
+		auto next = std::lower_bound(keys.begin(), keys.end(), frame);
+		result["next_keyframe"] = next == keys.end() ? json::UnknownElement(json::Null()) : json::UnknownElement(*next);
+		result["previous_keyframe"] = next == keys.begin() ? json::UnknownElement(json::Null()) : json::UnknownElement(*std::prev(next));
+	}
+	if (auto audio = context->project->AudioProvider()) {
+		result["audio_duration_ms"] = audio->GetNumSamples() * 1000 / audio->GetSampleRate();
+		result["audio_sample_rate"] = audio->GetSampleRate();
+	}
+	return result;
+}
+
+void McpBridge::PublishContext() {
+	if (directory.empty() || !context_dirty) return;
+	try { WriteJson(directory / "context.json", Context()); context_dirty = false; }
+	catch (...) { /* A transient read lock must not disrupt the GUI. Retry next tick. */ }
+}
 
 void McpBridge::Notify() {
 	// Modal tools can hold pointers into the document. Do not change it under them.
 	if (busy || !context->frame->IsEnabled()) return;
 	std::error_code ec;
 	if (!std::filesystem::is_directory(directory, ec)) { Stop(); return; }
+	PublishContext();
 	auto request = directory / "request.json";
 	if (!std::filesystem::is_regular_file(request, ec)) return;
 	busy = true;
@@ -257,7 +394,40 @@ json::Object McpBridge::Dispatch(std::string const& method, json::Object const& 
 		if (it == by_id.end()) throw std::runtime_error("Unknown subtitle ID; read the document again");
 		return it->second;
 	};
-	if (method == "get_document") {
+	if (method == "get_context") {
+		Keys(args, {});
+		return Context();
+	}
+	else if (method == "render_preview") {
+		Keys(args, {"time_ms", "max_width", "max_height", "raw"});
+		auto provider = context->project->VideoProvider();
+		if (!provider) throw std::runtime_error("Open a video or dummy video in this window before rendering a preview");
+		auto frame = context->videoController->GetFrameN();
+		if (args.count("time_ms")) {
+			auto time = int(Integer(args.at("time_ms"), 0, max_time));
+			if (time > context->videoController->TimeAtFrame(provider->GetFrameCount() - 1, agi::vfr::END))
+				throw std::runtime_error("Preview time is beyond the video duration");
+			frame = context->videoController->FrameAtTime(time);
+		}
+		auto time = context->videoController->TimeAtFrame(frame);
+		auto width = Integer(args.at("max_width"), 64, 1920);
+		auto height = Integer(args.at("max_height"), 64, 1080);
+		bool raw = args.at("raw");
+		provider->LoadSubtitles(context->ass.get());
+		auto image = GetImage(*provider->GetFrame(frame, time, raw));
+		double scale = std::min({1.0, double(width) / image.GetWidth(), double(height) / image.GetHeight()});
+		if (scale < 1.0) image.Rescale(std::max(1, int(image.GetWidth() * scale)), std::max(1, int(image.GetHeight() * scale)), wxIMAGE_QUALITY_HIGH);
+		wxMemoryOutputStream stream;
+		if (!image.SaveFile(stream, wxBITMAP_TYPE_PNG)) throw std::runtime_error("PNG preview encoding failed");
+		std::vector<unsigned char> png(stream.GetSize());
+		stream.CopyTo(png.data(), png.size());
+		result["png_base64"] = wxBase64Encode(png.data(), png.size()).ToStdString();
+		result["width"] = image.GetWidth();
+		result["height"] = image.GetHeight();
+		result["frame"] = frame;
+		result["time_ms"] = time;
+	}
+	else if (method == "get_document") {
 		Keys(args, {});
 		result["filename"] = context->subsController->Filename().string();
 		result["modified"] = context->subsController->IsModified();
@@ -306,7 +476,38 @@ json::Object McpBridge::Dispatch(std::string const& method, json::Object const& 
 		if (!allow_write) throw std::runtime_error("Read-only session; launch with --allow-write to edit");
 		if (Integer(args.at("expected_revision"), 1, INT64_MAX) != revision)
 			throw std::runtime_error("Document revision conflict; read the document again before editing");
-		if (method == "create_lines") {
+		if (method == "seek_video") {
+			Keys(args, {"expected_revision", "time_ms"});
+			auto time = int(Integer(args.at("time_ms"), 0, max_time));
+			auto provider = context->project->VideoProvider();
+			if (!provider) throw std::runtime_error("No video is loaded");
+			if (time > context->videoController->TimeAtFrame(provider->GetFrameCount() - 1, agi::vfr::END))
+				throw std::runtime_error("Seek time is beyond the video duration");
+			context->videoController->Stop();
+			context->videoController->JumpToTime(time);
+			ContextChanged();
+			return Context();
+		}
+		else if (method == "play_audio") {
+			Keys(args, {"expected_revision", "start_ms", "end_ms"});
+			auto start = int(Integer(args.at("start_ms"), 0, max_time));
+			auto end = int(Integer(args.at("end_ms"), 0, max_time));
+			auto audio = context->project->AudioProvider();
+			if (!audio) throw std::runtime_error("No audio is loaded");
+			if (end <= start || end - start > 30000 || end > audio->GetNumSamples() * 1000 / audio->GetSampleRate())
+				throw std::runtime_error("Audio range must be within the loaded audio and at most 30 seconds");
+			context->audioController->PlayRange(TimeRange(start, end));
+			ContextChanged();
+			return Context();
+		}
+		else if (method == "stop_playback") {
+			Keys(args, {"expected_revision"});
+			context->videoController->Stop();
+			context->audioController->Stop();
+			ContextChanged();
+			return Context();
+		}
+		else if (method == "create_lines") {
 			Keys(args, {"expected_revision", "lines", "after_id"});
 			json::Array const& lines = args.at("lines");
 			if (lines.empty() || lines.size() > 500) throw std::runtime_error("Supply 1 to 500 lines");

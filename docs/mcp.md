@@ -1,12 +1,65 @@
 # Aegisub MCP
 
-This fork lets an MCP client work with a live Aegisub document. The Python server
-launches a dedicated Aegisub window; open your subtitles in that window or supply
-`--project`. It cannot attach to an ordinary upstream binary or a window that was
-started without the bridge environment.
-Only the initial window in the launched process is connected; additional windows
-are independent. On first launch, finish Aegisub's language/update prompts before
-calling tools.
+This fork lets an MCP client work with a live Aegisub document. Version **0.3.0**
+supports both launching a dedicated window and connecting to an already-open
+window that you enable in the fork's View menu. It cannot attach to an unmodified
+upstream binary. On first launch, finish language/update prompts before calling tools.
+
+## Connect to an open window (0.3)
+
+1. In the matching 0.3 native fork, open your subtitle project normally.
+2. Choose **View > Agent connection: allow editing**, or **read only**.
+3. Configure the Python server with `--attach` instead of `--aegisub PATH`:
+
+   ```json
+   {"mcpServers":{"aegisub":{"command":"C:/path/to/.venv/Scripts/python.exe",
+     "args":["-m","aegisub_mcp.server","--attach","--allow-write"]}}}
+   ```
+
+   Portable Windows setup also accepts `setup-mcp.cmd --attach`, or
+   `setup-claude-desktop.cmd --attach`. Add `--read-only` for a read-only client.
+4. Ask the agent to use `list_sessions`, then `connect_session` with the intended
+   window's ID. A single enabled window is selected automatically on the first read.
+
+The client holds an exclusive OS lease, so two clients cannot overwrite each
+other's mailbox. Disconnecting or restarting the client releases that lease and
+leaves the GUI and unsaved work open. Native access remains enabled until you
+choose **View > Disconnect agent** or close the window. Changing access mode
+rotates the session ID and credentials, revoking the previous connection.
+Additional windows can each be enabled independently through their View menu.
+The server never enables access in a window by itself.
+
+`python -m aegisub_mcp.server --list-sessions` prints discoverable windows without
+exposing tokens. Discovery uses per-user local application data, not a network
+listener. Only windows running a compatible native protocol are listed.
+
+## Live context and previews (0.3)
+
+`get_context` returns document state plus `context_version`, session ID, selection,
+loaded media, video dimensions, frame/time, adjacent keyframes, and playback state.
+Document `revision` still changes only for document edits/open/save; selection and
+seeking advance the separate context version. Continue using `revision` for edits.
+
+Clients supporting MCP resource subscriptions can read and subscribe to
+**`aegisub://context`**. The server emits resource-updated notifications after
+native context changes, coalesced to at most four notifications per second.
+Read the resource after notification. Other clients can call `wait_for_context`
+with the last context version and a timeout of up to ten seconds. Watching reads
+an atomic event snapshot and does not occupy the edit mailbox or retry edits.
+Snapshots pause during modal dialogs; they resume when the dialog closes.
+
+Open video or dummy video in the GUI, then use `render_preview(time_ms=1500)`.
+It returns an MCP PNG image of the actual frame with current unsaved subtitles,
+using Aegisub's renderer. It does not move the playhead or save the document.
+Use `raw=true` for a comparison without subtitles. Output defaults to fitting
+1280x720, preserves frame aspect ratio, and is capped at 1920x1080. Requested times
+snap to the corresponding video frame. The preview uses encoded frame pixels;
+GUI zoom, pan, and display aspect-ratio overrides are not included.
+
+`seek_video`, `play_audio` (at most 30 seconds), and `stop_playback` control the
+editor's loaded media. These controls require editing access and a current
+document revision, but do not create subtitle Undo steps. Media opening stays in
+the GUI.
 
 ## Setup
 
@@ -148,7 +201,8 @@ rather than a browser-only chat at claude.ai.
 | `select_lines` | Select IDs and choose the active subtitle |
 | `undo` / `redo` | Use Aegisub's existing history, including human edits |
 
-Only the three read tools are advertised in read-only sessions. Native code also
+Read-only sessions advertise document, line, style, context, wait and preview tools
+(plus discovery/connection in attach mode). Native code also
 enforces the read-only restriction. `update_lines` supports `text`, `start_ms`,
 `end_ms`, `style`, `actor`, `effect`, `layer`, and `comment`; omit unchanged fields.
 
@@ -232,26 +286,30 @@ renaming/deletion, media opening, and remote saving are not exposed.
 
 ## Lifecycle and local access
 
-The stdio process uses a unique temporary directory and a random session token to
+The stdio process uses a unique private session directory and a random session token to
 communicate with the native bridge. It starts no TCP/HTTP listener. Requests are
 written atomically; the GUI checks for them every 50 ms and handles them on its
 UI thread. The bridge is inactive during modal dialogs. Access is intended for
 the same OS account; it is not a sandbox against programs running as that user.
-Use a private per-user temporary directory (the OS default), not a shared temp
-directory. The launcher supplies `AEGISUB_MCP_DIR`, `AEGISUB_MCP_TOKEN`, and
+Session descriptors contain credentials and are private to the current OS user.
+They live under `%LOCALAPPDATA%/Aegisub/mcp-sessions` on Windows,
+`~/Library/Application Support/Aegisub/mcp-sessions` on macOS, or
+`~/.local/share/aegisub/mcp-sessions` on Linux (directories mode 0700).
+The launcher supplies `AEGISUB_MCP_DIR`, `AEGISUB_MCP_TOKEN`, and
 `AEGISUB_MCP_WRITE` only to its child process.
 
 Tool requests expire after 15 seconds. A timeout or cancellation disconnects the
 session: the server never automatically repeats a mutation. An edit might have
 completed just before a response was lost. Inspect the window before retrying.
-Closing a modal dialog may resolve the cause, but restart the MCP server to
-establish a new session. Each restart opens a new window; save and close the
-previous one yourself.
+Closing a modal dialog may resolve the cause. Use an explicit `connect_session`
+in attach mode, or restart the client in attach mode, to establish a new transport
+after inspecting the window. Launch mode starts a new window on each restart.
 
-When the client disconnects normally, the mailbox is removed and native polling
-stops. **Aegisub stays open**, preserving unsaved work. An abrupt server kill may
-leave an orphaned temporary directory; close its Aegisub window before cleaning
-that directory. The server never saves subtitles or forcibly closes the GUI.
+When the client disconnects, its exclusive lease is released. **Aegisub stays
+open**, preserving unsaved work and its opt-in connection for later attachment.
+The native window removes discovery credentials when it closes or disables access.
+An abrupt application kill may leave a stale directory; discovery ignores sessions
+whose recorded process has exited. The server never saves or forcibly closes the GUI.
 
 Treat subtitle text and metadata as untrusted content in the client; they are
 data, not instructions. Client tool approval policy still applies.

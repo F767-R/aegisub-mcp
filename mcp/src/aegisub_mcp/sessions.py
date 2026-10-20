@@ -1,0 +1,175 @@
+"""Discover opt-in native windows and hold an OS-released exclusive client lease."""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+from .bridge import Bridge, BridgeError
+
+SESSION_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def registry_path() -> Path:
+    if sys.platform == "win32":
+        root = os.environ.get("LOCALAPPDATA")
+        if not root:
+            raise BridgeError("LOCALAPPDATA is unavailable")
+        return Path(root) / "Aegisub" / "mcp-sessions"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Aegisub" / "mcp-sessions"
+    return Path.home() / ".local" / "share" / "aegisub" / "mcp-sessions"
+
+
+def process_alive(pid: int) -> bool:
+    if type(pid) is not int or pid <= 0:
+        return False
+    if sys.platform == "win32":
+        # os.kill(pid, 0) is unsafe on Windows. Query a handle instead.
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def read_session(directory: Path) -> dict:
+    # Do not follow registry entries outside the per-user registry.
+    if directory.is_symlink() or directory.resolve().parent != directory.parent.resolve():
+        raise BridgeError("Invalid session directory")
+    path = directory / "session.json"
+    if path.is_symlink() or path.stat().st_size > 16384:
+        raise BridgeError("Invalid session descriptor")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if (data.get("protocol_version") != 3 or data.get("session_id") != directory.name
+            or not SESSION_ID.fullmatch(directory.name)
+            or not re.fullmatch(r"[0-9a-f]{64}", data.get("token", ""))
+            or type(data.get("write_enabled")) is not bool
+            or not process_alive(data.get("pid"))):
+        raise BridgeError("Session is stale or uses an incompatible native build")
+    return data
+
+
+class ClientLease:
+    """One client per window, including across separate MCP server processes."""
+    def __init__(self, directory: Path):
+        self.file = (directory / "client.lock").open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.file.seek(0)
+                if not self.file.read(1):
+                    self.file.write(b"\0")
+                    self.file.flush()
+                self.file.seek(0)
+                msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self.file.close()
+            raise BridgeError("This Aegisub window is already connected to another MCP client") from exc
+
+    def close(self):
+        # Closing the descriptor releases the lock even after a client crashes.
+        self.file.close()
+
+
+def list_sessions(registry: Path | None = None) -> list[dict]:
+    registry = registry or registry_path()
+    result = []
+    if not registry.is_dir():
+        return result
+    for directory in sorted(registry.iterdir()):
+        if not SESSION_ID.fullmatch(directory.name) or not directory.is_dir():
+            continue
+        try:
+            data = read_session(directory)
+            context = Bridge(directory, data["token"]).read_context()
+            result.append({"session_id": data["session_id"], "pid": data["pid"],
+                           "write_enabled": data["write_enabled"],
+                           "filename": context.get("filename", ""),
+                           "modified": context.get("modified", False),
+                           "selected_ids": context.get("selected_ids", [])})
+        except (OSError, ValueError, TypeError, AttributeError, BridgeError):
+            continue
+    return result
+
+
+class SessionManager:
+    """Attach mode: discover windows without spawning or taking over another client."""
+    def __init__(self, allow_write: bool, registry: Path | None = None):
+        self.allow_write = allow_write
+        self.registry = registry or registry_path()
+        self.bridge: Bridge | None = None
+        self.lease: ClientLease | None = None
+        self.session_id: str | None = None
+
+    def list_sessions(self) -> list[dict]:
+        return list_sessions(self.registry)
+
+    def connect(self, session_id: str) -> dict:
+        if not SESSION_ID.fullmatch(session_id):
+            raise BridgeError("Invalid session ID; use list_sessions")
+        directory = self.registry / session_id
+        data = read_session(directory)
+        if self.allow_write and not data["write_enabled"]:
+            raise BridgeError("Enable 'Agent connection: allow editing' in the selected window first")
+        if session_id == self.session_id and self.bridge and not self.bridge._failed:
+            return self.bridge.read_context()
+        if session_id == self.session_id:
+            # Explicit reconnect after a transport failure releases our own lease.
+            self.close()
+        lease = ClientLease(directory)
+        try:
+            bridge = Bridge(directory, data["token"], allow_write=self.allow_write)
+            # Validate before releasing a previously selected window.
+            context = bridge.read_context()
+        except BaseException:
+            lease.close()
+            raise
+        self.close()
+        self.lease, self.bridge, self.session_id = lease, bridge, session_id
+        return context
+
+    def _connected(self) -> Bridge:
+        if not self.bridge:
+            sessions = self.list_sessions()
+            if len(sessions) != 1:
+                raise BridgeError("Use list_sessions and connect_session to choose an enabled Aegisub window")
+            self.connect(sessions[0]["session_id"])
+        # Detect closed windows and credential rotation before publishing anything.
+        data = read_session(self.bridge.directory)
+        if data["token"] != self.bridge.token:
+            raise BridgeError("Session credentials changed; reconnect to the window")
+        return self.bridge
+
+    async def call(self, method: str, args: dict | None = None) -> dict:
+        return await self._connected().call(method, args)
+
+    def read_context(self) -> dict:
+        return self._connected().read_context()
+
+    def close(self):
+        if self.lease:
+            self.lease.close()
+        self.lease = self.bridge = self.session_id = None
