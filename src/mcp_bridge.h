@@ -20,6 +20,8 @@ class McpBridge final : public wxTimer, private agi::signal::ConnectionScope {
 	bool owns_directory = false;
 	int64_t context_version = 1;
 	bool context_dirty = true;
+	bool video_playing = false;
+	bool audio_playing = false;
 	void ContextChanged();
 	void PublishContext();
 	void StartSession();

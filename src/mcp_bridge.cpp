@@ -34,7 +34,6 @@
 #include <wx/base64.h>
 #include <wx/image.h>
 #include <wx/mstream.h>
-#include <wx/stdpaths.h>
 
 namespace {
 constexpr int64_t max_time = 35999990; // ASS: 9:59:59.99
@@ -241,7 +240,7 @@ McpBridge::McpBridge(agi::Context *context) : context(context) {
 	if (secret.length() < 32) return;
 	directory = agi::fs::path(dir.ToStdWstring());
 	std::error_code ec;
-	if (!directory.is_absolute() || !std::filesystem::is_directory(directory, ec)) return;
+	if (!directory.is_absolute() || !std::filesystem::is_directory(directory, ec)) { directory.clear(); return; }
 	claimed = true;
 	token = secret.ToStdString();
 	allow_write = wxGetEnv("AEGISUB_MCP_WRITE", &writable) && writable == "1";
@@ -289,7 +288,7 @@ void McpBridge::Disable() {
 	if (!directory.empty()) {
 		std::error_code ec;
 		// Only remove bridge-owned files. Never recursively delete a user-supplied directory.
-		for (auto name : {"session.json", "context.json", "request.json", "preview.png"})
+		for (auto name : {"session.json", "context.json", "request.json", "session.json.tmp", "context.json.tmp"})
 			std::filesystem::remove(directory / name, ec);
 		if (owns_directory) std::filesystem::remove(directory, ec);
 	}
@@ -311,6 +310,17 @@ json::Object McpBridge::Context() {
 	result["audio_loaded"] = !!context->project->AudioProvider();
 	result["video_playing"] = context->videoController->IsPlaying();
 	result["audio_playing"] = context->audioController->IsPlaying();
+	result["audio_position_ms"] = context->audioController->GetPlaybackPosition();
+	if (auto active = context->selectionController->GetActiveLine()) {
+		int row = 0;
+		for (auto const& line : context->ass->Events) {
+			++row;
+			if (&line == active) {
+				result["active_line"] = Line(line, row, context->selectionController->GetSelectedSet());
+				break;
+			}
+		}
+	}
 	if (auto provider = context->project->VideoProvider()) {
 		auto frame = context->videoController->GetFrameN();
 		result["frame"] = frame;
@@ -341,6 +351,13 @@ void McpBridge::Notify() {
 	if (busy || !context->frame->IsEnabled()) return;
 	std::error_code ec;
 	if (!std::filesystem::is_directory(directory, ec)) { Stop(); return; }
+	auto new_video_playing = context->videoController->IsPlaying();
+	auto new_audio_playing = context->audioController->IsPlaying();
+	if (new_video_playing != video_playing || new_audio_playing != audio_playing) {
+		video_playing = new_video_playing;
+		audio_playing = new_audio_playing;
+		ContextChanged();
+	}
 	PublishContext();
 	auto request = directory / "request.json";
 	if (!std::filesystem::is_regular_file(request, ec)) return;
@@ -407,7 +424,7 @@ json::Object McpBridge::Dispatch(std::string const& method, json::Object const& 
 			auto time = int(Integer(args.at("time_ms"), 0, max_time));
 			if (time > context->videoController->TimeAtFrame(provider->GetFrameCount() - 1, agi::vfr::END))
 				throw std::runtime_error("Preview time is beyond the video duration");
-			frame = context->videoController->FrameAtTime(time);
+			frame = std::clamp(context->videoController->FrameAtTime(time), 0, provider->GetFrameCount() - 1);
 		}
 		auto time = context->videoController->TimeAtFrame(frame);
 		auto width = Integer(args.at("max_width"), 64, 1920);

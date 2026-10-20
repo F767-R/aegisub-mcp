@@ -17,6 +17,13 @@ setup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(setup)
 
 
+def test_attach_configuration_uses_existing_window_mode(tmp_path):
+    server = setup.server_config(tmp_path, read_only=True, attach=True)
+    assert server["args"] == ["-m", "aegisub_mcp.server", "--attach"]
+    server = setup.server_config(tmp_path, attach=True)
+    assert server["args"] == ["-m", "aegisub_mcp.server", "--attach", "--allow-write"]
+
+
 @pytest.mark.parametrize("packaged", [False, True])
 def test_desktop_config_path_handles_store_installation(tmp_path, monkeypatch, packaged):
     roaming = tmp_path / "Roaming"

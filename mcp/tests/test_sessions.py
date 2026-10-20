@@ -1,4 +1,5 @@
 import json
+import asyncio
 import os
 import subprocess
 import sys
@@ -87,3 +88,32 @@ def test_rotation_revokes_existing_client(tmp_path):
     with pytest.raises(BridgeError, match="credentials changed"):
         manager.read_context()
     manager.close()
+
+
+async def test_switching_does_not_release_lease_during_inflight_request(tmp_path):
+    directory = make_session(tmp_path)
+    second = make_session(tmp_path, "c" * 32)
+    manager = SessionManager(False, tmp_path)
+    manager.connect(directory.name)
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def delayed(method, args):
+        started.set()
+        await finish.wait()
+        return {"revision": 4}
+
+    manager.bridge.call = delayed
+    task = asyncio.create_task(manager.call("get_document"))
+    try:
+        await started.wait()
+        with pytest.raises(BridgeError, match="current tool call"):
+            manager.connect(second.name)
+        with pytest.raises(BridgeError, match="already connected"):
+            ClientLease(directory)
+        finish.set()
+        await task
+        manager.connect(second.name)
+    finally:
+        finish.set()
+        await task
+        manager.close()

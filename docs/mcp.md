@@ -63,8 +63,9 @@ the GUI.
 
 ## Setup
 
-Line creation/deletion and style creation/editing require the **0.2.0 server and
-matching native build**. Older Windows releases do not contain these tools.
+This server requires the **0.3.0 server and matching native build** for session
+discovery, live context, and previews. Older Windows releases do not contain these
+features; update both the application and Python server together.
 See [Windows build and monitoring instructions](build-mcp-windows.md) to build
 the current branch and follow its progress yourself.
 
@@ -126,9 +127,10 @@ Aegisub. See the official [Claude Code CLI reference](https://code.claude.com/do
 and [Claude Desktop MCP guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers).
 
 Both clients use the same reading, subtitle/timing/style editing, effect creation,
-selection, and Undo/Redo tools as other MCP hosts. Each connection launches its
-own Aegisub process; Claude cannot take over a window already launched by Codex.
-Open the saved `.ass` file in Claude's window and press Ctrl+S to save edits.
+selection, and Undo/Redo tools as other MCP hosts. Launch-mode connections each
+start an Aegisub process. Attach mode can connect to a previously enabled window
+after its previous MCP client disconnects; only one client holds its lease at once.
+Press Ctrl+S in Aegisub to save edits.
 The Aegisub bridge does not need an Anthropic API key; authenticate with your
 Claude client as usual. Local stdio requires Claude Desktop or local Claude Code,
 rather than a browser-only chat at claude.ai.
@@ -192,6 +194,10 @@ rather than a browser-only chat at claude.ai.
 | `get_document` | Revision, filename, unsaved state, script width/height, line count, active line, selection, Undo/Redo availability |
 | `list_lines` | Paginated subtitle text, timestamps, metadata, IDs and selection |
 | `list_styles` | Style names, structured properties, and full ASS definitions |
+| `list_sessions` / `connect_session` | Discover and select an enabled open window (attach mode) |
+| `get_context` / `wait_for_context` | Read or wait for selection, playhead, media and document context |
+| `render_preview` | Render the current unsaved subtitles over a video frame as a PNG image |
+| `seek_video` / `play_audio` / `stop_playback` | Control loaded media without editing subtitle content |
 | `create_lines` | Insert/append up to 500 new lines; return IDs in input order and select them |
 | `delete_lines` | Delete up to 500 IDs; preserve one blank line if the whole document is cleared |
 | `create_style` | Create a uniquely named style, optionally cloning an existing style |

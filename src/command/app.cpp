@@ -56,6 +56,11 @@ struct app_agent_read final : public Command {
 	STR_MENU("Agent connection: read only")
 	STR_DISP("Enable agent connection (read only)")
 	STR_HELP("Allow a local MCP client to connect to this window without editing")
+	CMD_TYPE(COMMAND_RADIO)
+	bool IsActive(agi::Context const *c) override {
+		auto bridge = c->frame->GetMcpBridge();
+		return bridge && bridge->IsActive() && !bridge->IsWritable();
+	}
 	void operator()(agi::Context *c) override { c->frame->GetMcpBridge()->Enable(false); }
 };
 
@@ -64,6 +69,11 @@ struct app_agent_write final : public Command {
 	STR_MENU("Agent connection: allow editing")
 	STR_DISP("Enable agent connection (allow editing)")
 	STR_HELP("Allow a local MCP client to connect and make undoable edits in this window")
+	CMD_TYPE(COMMAND_RADIO)
+	bool IsActive(agi::Context const *c) override {
+		auto bridge = c->frame->GetMcpBridge();
+		return bridge && bridge->IsActive() && bridge->IsWritable();
+	}
 	void operator()(agi::Context *c) override { c->frame->GetMcpBridge()->Enable(true); }
 };
 
@@ -72,6 +82,11 @@ struct app_agent_disconnect final : public Command {
 	STR_MENU("Disconnect agent")
 	STR_DISP("Disconnect agent")
 	STR_HELP("Disable agent access to this window without discarding unsaved work")
+	CMD_TYPE(COMMAND_RADIO)
+	bool IsActive(agi::Context const *c) override {
+		auto bridge = c->frame->GetMcpBridge();
+		return !bridge || !bridge->IsActive();
+	}
 	void operator()(agi::Context *c) override { c->frame->GetMcpBridge()->Disable(); }
 };
 

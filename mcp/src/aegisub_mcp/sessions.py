@@ -60,9 +60,10 @@ def read_session(directory: Path) -> dict:
     if path.is_symlink() or path.stat().st_size > 16384:
         raise BridgeError("Invalid session descriptor")
     data = json.loads(path.read_text(encoding="utf-8"))
-    if (data.get("protocol_version") != 3 or data.get("session_id") != directory.name
+    if (not isinstance(data, dict) or data.get("protocol_version") != 3 or data.get("session_id") != directory.name
             or not SESSION_ID.fullmatch(directory.name)
-            or not re.fullmatch(r"[0-9a-f]{64}", data.get("token", ""))
+            or not isinstance(data.get("token"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", data["token"])
             or type(data.get("write_enabled")) is not bool
             or not process_alive(data.get("pid"))):
         raise BridgeError("Session is stale or uses an incompatible native build")
@@ -123,11 +124,14 @@ class SessionManager:
         self.bridge: Bridge | None = None
         self.lease: ClientLease | None = None
         self.session_id: str | None = None
+        self._pending = 0
 
     def list_sessions(self) -> list[dict]:
         return list_sessions(self.registry)
 
     def connect(self, session_id: str) -> dict:
+        if self._pending:
+            raise BridgeError("Wait for the current tool call to finish before switching or reconnecting windows")
         if not SESSION_ID.fullmatch(session_id):
             raise BridgeError("Invalid session ID; use list_sessions")
         directory = self.registry / session_id
@@ -164,7 +168,12 @@ class SessionManager:
         return self.bridge
 
     async def call(self, method: str, args: dict | None = None) -> dict:
-        return await self._connected().call(method, args)
+        bridge = self._connected()
+        self._pending += 1
+        try:
+            return await bridge.call(method, args)
+        finally:
+            self._pending -= 1
 
     def read_context(self) -> dict:
         return self._connected().read_context()
