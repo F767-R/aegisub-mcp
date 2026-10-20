@@ -22,7 +22,8 @@ async def test_stdio_initialize_list_and_unicode_tool_call(tmp_path):
         async with ClientSession(read, write) as client:
             initialized = await client.initialize()
             assert initialized.serverInfo.name == "Aegisub"
-            assert len((await client.list_tools()).tools) == 3
+            assert initialized.capabilities.resources.subscribe
+            assert len((await client.list_tools()).tools) == 6
             call = asyncio.create_task(client.call_tool("get_document", {}))
             for _ in range(400):
                 if (tmp_path / "request.json").exists():

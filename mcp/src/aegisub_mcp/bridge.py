@@ -8,15 +8,14 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
-import tempfile
 import time
 import uuid
 
 MAX_REQUEST = 4 * 1024 * 1024
 MAX_RESPONSE = 64 * 1024 * 1024
-READ_METHODS = frozenset({"get_document", "list_lines", "list_styles"})
+READ_METHODS = frozenset({"get_document", "list_lines", "list_styles", "get_context", "render_preview"})
 WRITE_METHODS = frozenset({"update_lines", "create_lines", "delete_lines", "create_style", "update_style",
-                           "shift_times", "select_lines", "undo", "redo"})
+                           "shift_times", "select_lines", "undo", "redo", "seek_video", "play_audio", "stop_playback"})
 
 
 class BridgeError(RuntimeError):
@@ -43,6 +42,19 @@ class Bridge:
         self.process = process
         self._lock = asyncio.Lock()
         self._failed = False
+
+    def read_context(self) -> dict:
+        """Native event snapshot: no mailbox request, including while a modal dialog is open."""
+        if self.process is not None and self.process.poll() is not None:
+            raise BridgeError("Aegisub has exited")
+        path = self.directory / "context.json"
+        if path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
+            raise BridgeError("Invalid live context snapshot")
+        result = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(result, dict) or type(result.get("context_version")) is not int
+                or type(result.get("revision")) is not int):
+            raise BridgeError("Invalid live context snapshot")
+        return result
 
     async def call(self, method: str, args: dict | None = None) -> dict:
         if method not in READ_METHODS | WRITE_METHODS:
@@ -107,8 +119,14 @@ class LaunchedSession:
             project = project.resolve(strict=True)
             if not project.is_file():
                 raise ValueError("--project must name a subtitle file")
-        self._temporary = tempfile.TemporaryDirectory(prefix="aegisub-mcp-")
-        self.directory = Path(self._temporary.name)
+        from .sessions import ClientLease, registry_path
+        registry = registry_path()
+        registry.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # The native window owns this directory until it closes or disables access.
+        # Keeping it on disconnect allows another client to reconnect to unsaved work.
+        self.directory = registry / secrets.token_hex(16)
+        self.directory.mkdir(mode=0o700)
+        self._lease = ClientLease(self.directory)
         token = secrets.token_hex(32)
         env = os.environ.copy()
         env.update(AEGISUB_MCP_DIR=str(self.directory), AEGISUB_MCP_TOKEN=token,
@@ -121,11 +139,13 @@ class LaunchedSession:
             self.process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except BaseException:
-            self._temporary.cleanup()
+            self._lease.close()
+            (self.directory / "client.lock").unlink(missing_ok=True)
+            self.directory.rmdir()
             raise
         self.bridge = Bridge(self.directory, token, allow_write=allow_write, process=self.process)
 
     def close(self) -> None:
-        # Removing the mailbox disables the native bridge on its next timer tick.
-        # Do not terminate the GUI: the user may have unsaved changes.
-        self._temporary.cleanup()
+        # Disconnect only this client. Native access remains opt-in and can be
+        # disabled in View; the GUI and unsaved work survive client restarts.
+        self._lease.close()

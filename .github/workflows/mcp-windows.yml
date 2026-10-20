@@ -5,6 +5,8 @@ on:
     branches: [mcp-support]
     paths: ['src/**', 'libaegisub/**', 'mcp/**', 'meson.build', 'meson_options.txt', 'subprojects/**', 'tools/mcp-*', 'tools/version.ps1', '.github/workflows/mcp-windows.yml']
   workflow_dispatch:
+  pull_request:
+    paths: ['src/**', 'libaegisub/**', 'mcp/**', 'meson.build', 'tools/mcp-*', '.github/workflows/mcp-windows.yml']
 
 permissions:
   contents: read
@@ -29,7 +31,9 @@ jobs:
             build
             subprojects
           key: windows-msvc-native-v1-${{ hashFiles('subprojects/*.wrap', 'meson.build') }}-${{ github.sha }}
-          restore-keys: windows-msvc-native-v1-${{ hashFiles('subprojects/*.wrap', 'meson.build') }}-
+          restore-keys: |
+            windows-msvc-native-v1-${{ hashFiles('subprojects/*.wrap', 'meson.build') }}-
+            windows-msvc-native-v1-
       - name: Keep current tracked dependency sources after cache restore
         run: git restore --source=HEAD --worktree -- subprojects
       - name: Install build tools
@@ -90,7 +94,7 @@ jobs:
           $config = Join-Path $portable 'config.json'
           $original = [IO.File]::ReadAllText($config)
           try {
-            '{"App":{"Local Config":true,"Language":"en_US","First Start":false,"Auto":{"Check For Updates":false,"Save":false}}}' | Set-Content $config -Encoding utf8
+            '{"App":{"Local Config":true,"Language":"en_US","First Start":false,"Auto":{"Check For Updates":false,"Save":false,"Load Linked Files":1}}}' | Set-Content $config -Encoding utf8
             $env:AEGISUB_MCP_TEST_EXE = Join-Path $portable 'aegisub.exe'
             python -m pytest mcp/tests -v
             if ($LASTEXITCODE) { throw 'Packaged Windows MCP tests failed' }

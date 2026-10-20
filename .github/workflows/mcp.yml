@@ -39,7 +39,7 @@ jobs:
       - name: Real GUI integration
         run: |
           mkdir -p ~/.aegisub
-          echo '{"App":{"Language":"en_US","First Start":false,"Auto":{"Check For Updates":false,"Save":false}}}' > ~/.aegisub/config.json
+          echo '{"App":{"Language":"en_US","First Start":false,"Auto":{"Check For Updates":false,"Save":false,"Load Linked Files":1}}}' > ~/.aegisub/config.json
           xvfb-run -a python -m pytest mcp/tests/test_native.py -v
         env:
           AEGISUB_MCP_TEST_EXE: ${{ github.workspace }}/build/aegisub

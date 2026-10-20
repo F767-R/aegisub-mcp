@@ -17,10 +17,23 @@ class McpBridge final : public wxTimer, private agi::signal::ConnectionScope {
 	int64_t revision = 1;
 	bool allow_write = false;
 	bool busy = false;
+	bool owns_directory = false;
+	int64_t context_version = 1;
+	bool context_dirty = true;
+	bool video_playing = false;
+	bool audio_playing = false;
+	void ContextChanged();
+	void PublishContext();
+	void StartSession();
+	json::Object Context();
 	void Changed();
 	void Notify() override;
 	json::Object Dispatch(std::string const& method, json::Object const& args);
 public:
 	explicit McpBridge(agi::Context *context);
 	~McpBridge() override;
+	void Enable(bool writable);
+	void Disable();
+	bool IsActive() const { return IsRunning(); }
+	bool IsWritable() const { return allow_write; }
 };

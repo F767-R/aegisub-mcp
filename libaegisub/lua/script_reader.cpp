@@ -51,7 +51,7 @@ namespace agi::lua {
 		auto size = static_cast<size_t>(file.size());
 
 		// Discard the BOM if present
-		if (size >= 3 && buff[0] == -17 && buff[1] == -69 && buff[2] == -65) {
+		if (size >= 3 && buff[0] == '\xef' && buff[1] == '\xbb' && buff[2] == '\xbf') {
 			buff += 3;
 			size -= 3;
 		}
@@ -75,8 +75,8 @@ namespace agi::lua {
 			return false; // Leaves error message on stack
 
 		// loadstring returns nil, error on error or a function on success
-		if (lua_isnil(L, 1)) {
-			lua_remove(L, 1);
+		if (lua_isnil(L, -2)) {
+			lua_remove(L, -2);
 			return false;
 		}
 
@@ -114,7 +114,7 @@ namespace agi::lua {
 
 			try {
 				if (!LoadFile(L, path))
-					return error(L, "Error loading Lua module \"%s\":\n%s", path.string().c_str(), check_string(L, 1).c_str());
+					return error(L, "Error loading Lua module \"%s\":\n%s", path.string().c_str(), check_string(L, -1).c_str());
 				break;
 			}
 			catch (agi::fs::FileNotFound const&) {
