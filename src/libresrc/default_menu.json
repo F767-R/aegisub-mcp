@@ -129,6 +129,8 @@
         { "command" : "app/agent/write" },
         { "command" : "app/agent/disconnect" },
         {},
+        { "command" : "app/agent/release" },
+        {},
         { "command" : "app/language" },
         { "command" : "app/options", "special" : "options" },
         {},

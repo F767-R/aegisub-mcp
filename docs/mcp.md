@@ -1,6 +1,6 @@
 # Aegisub MCP
 
-This fork lets an MCP client work with a live Aegisub document. Version **0.3.0**
+This fork lets an MCP client work with a live Aegisub document. Version **0.3.2**
 supports both launching a dedicated window and connecting to an already-open
 window that you enable in the fork's View menu. It cannot attach to an unmodified
 upstream binary. On first launch, finish language/update prompts before calling tools.
@@ -9,11 +9,11 @@ upstream binary. On first launch, finish language/update prompts before calling 
 
 1. In the matching 0.3 native fork, open your subtitle project normally.
 2. Choose **View > Agent connection: allow editing**, or **read only**.
-3. Configure the Python server with `--attach` instead of `--aegisub PATH`:
+3. Configure the Python server with `--attach --aegisub PATH`:
 
    ```json
    {"mcpServers":{"aegisub":{"command":"C:/path/to/.venv/Scripts/python.exe",
-     "args":["-m","aegisub_mcp.server","--attach","--allow-write"]}}}
+     "args":["-m","aegisub_mcp.server","--attach","--aegisub","C:/path/to/aegisub.exe","--allow-write"]}}}
    ```
 
    Portable Windows setup also accepts `setup-mcp.cmd --attach`, or
@@ -21,13 +21,55 @@ upstream binary. On first launch, finish language/update prompts before calling 
 4. Ask the agent to use `list_sessions`, then `connect_session` with the intended
    window's ID. A single enabled window is selected automatically on the first read.
 
+### Open a new window on request (server 0.3.1)
+
+With `--attach --aegisub PATH`, the agent also receives `open_window`.
+Call `open_window()` for a blank document, or
+`open_window(project_file="C:/path/to/subtitles.ass")` to open an existing local
+subtitle file. Each explicit call creates one new window and connects to it;
+existing documents and unsaved work stay open. Native 0.3 builds are compatible.
+Tool discovery, enabling MCP, and client reconnects never invoke this tool.
+
+The window is created through a short-lived independent launcher. On Windows,
+the local process provider keeps it outside the MCP client's kill-on-close job;
+the base Python interpreter avoids extra venv redirector jobs. It therefore
+survives clients that terminate their process jobs on disconnect. Finish any first-run
+or linked-media prompts in the GUI. If a call fails or is cancelled, inspect
+`list_sessions` before retrying; a window might already have started.
+
+Windows setup now defaults to this mode. `--attach` without `--aegisub` remains
+supported for connecting only, and exposes no window-opening tool. Use
+`setup-mcp.cmd --launch-on-connect` only if you deliberately want the legacy
+behavior of opening a new GUI for every MCP connection.
+
 The client holds an exclusive OS lease, so two clients cannot overwrite each
 other's mailbox. Disconnecting or restarting the client releases that lease and
 leaves the GUI and unsaved work open. Native access remains enabled until you
-choose **View > Disconnect agent** or close the window. Changing access mode
+choose **View > Disable all agent access** or close the window. Changing access mode
 rotates the session ID and credentials, revoking the previous connection.
 Additional windows can each be enabled independently through their View menu.
 The server never enables access in a window by itself.
+
+### Switch between Codex and Claude (0.3.2)
+
+Choose **View > Disconnect current agent (allow another)** in the Aegisub window.
+This revokes the current client's session and publishes a fresh session for the
+same window. It preserves read-only/editing permissions, unsaved subtitles,
+selection, media, and Undo history. It never starts or closes a window.
+
+Ask the other agent to call `list_sessions`, then `connect_session` with the
+window's new ID. Only the client that explicitly connects takes control.
+The disconnected client cannot reclaim the window through background resource
+polling or ordinary tool calls; it must explicitly connect again. To switch back,
+repeat the menu command and ask the first agent to connect.
+
+An agent can also call `disconnect_session` to release its own connection without
+rotating the native session. Its background polling stays disconnected. The
+separate **Disable all agent access** option makes the window unavailable to
+every client until you enable read-only or editing access again. The handoff
+menu requires the 0.3.2 native build; the disconnect tool works with native 0.3.
+If a request was in flight when disconnected, inspect the document before
+retrying it: the GUI may already have applied it. Requests are never retried.
 
 `python -m aegisub_mcp.server --list-sessions` prints discoverable windows without
 exposing tokens. Discovery uses per-user local application data, not a network
@@ -63,7 +105,7 @@ the GUI.
 
 ## Setup
 
-This server requires the **0.3.0 server and matching native build** for session
+This server requires a **0.3 or newer native build** for session
 discovery, live context, and previews. Older Windows releases do not contain these
 features; update both the application and Python server together.
 See [Windows build and monitoring instructions](build-mcp-windows.md) to build
@@ -91,8 +133,8 @@ assets include SHA-256 checksums. Python is required for MCP, not ordinary editi
 Install and run Claude Desktop, then fully quit it (including the system tray).
 In the portable folder, double-click **`setup-claude-desktop.cmd`**. It installs
 the server if needed, or reuses the environment from `setup-mcp.cmd`. Reopen
-Claude Desktop and ask: "Use Aegisub's get_document tool, then list its styles."
-Open your subtitle file in the Aegisub window that Claude launches.
+Claude Desktop and ask: "List the enabled Aegisub windows and connect to mine."
+Enable your window in its View menu, or explicitly ask Claude to open a new one.
 
 Setup merges only `mcpServers.aegisub` into
 `%APPDATA%\Claude\claude_desktop_config.json`, preserving other servers and
@@ -195,6 +237,7 @@ rather than a browser-only chat at claude.ai.
 | `list_lines` | Paginated subtitle text, timestamps, metadata, IDs and selection |
 | `list_styles` | Style names, structured properties, and full ASS definitions |
 | `list_sessions` / `connect_session` | Discover and select an enabled open window (attach mode) |
+| `open_window` | Open one new window on request, optionally with a local subtitle file (attach mode plus executable path) |
 | `get_context` / `wait_for_context` | Read or wait for selection, playhead, media and document context |
 | `render_preview` | Render the current unsaved subtitles over a video frame as a PNG image |
 | `seek_video` / `play_audio` / `stop_playback` | Control loaded media without editing subtitle content |
