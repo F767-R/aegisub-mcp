@@ -109,8 +109,14 @@ async def test_native_explicit_window_survives_stdio_client_cleanup():
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
+    # The SDK's POSIX safe environment excludes DISPLAY/XAUTHORITY, which are
+    # needed to reach the test's Xvfb desktop. Do not forward unrelated secrets.
+    desktop_env = {name: os.environ[name] for name in
+        ('DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'LD_LIBRARY_PATH')
+        if name in os.environ}
     params = StdioServerParameters(command=sys.executable, args=[
-        '-m', 'aegisub_mcp.server', '--attach', '--aegisub', str(Path(EXE).resolve()), '--allow-write'])
+        '-m', 'aegisub_mcp.server', '--attach', '--aegisub', str(Path(EXE).resolve()), '--allow-write'],
+        env=desktop_env)
     pid = None
     try:
         async with stdio_client(params) as (read, write):
