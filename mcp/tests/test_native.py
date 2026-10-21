@@ -5,16 +5,46 @@ Only disposable fixture instances are terminated by these tests.
 import os
 import base64
 import struct
+import asyncio
+import json
+import signal
+import sys
 from pathlib import Path
 
 import pytest
 
 from aegisub_mcp.bridge import BridgeError, LaunchedSession
 from aegisub_mcp.sessions import SessionManager
+from aegisub_mcp.sessions import process_alive
 
 EXE = os.environ.get("AEGISUB_MCP_TEST_EXE")
 pytestmark = pytest.mark.skipif(not EXE, reason="Native fork executable not supplied")
 FIXTURE = Path(__file__).parent / "fixtures" / "example.ass"
+
+
+async def test_native_explicit_window_survives_stdio_client_cleanup():
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(command=sys.executable, args=[
+        '-m', 'aegisub_mcp.server', '--attach', '--aegisub', str(Path(EXE).resolve()), '--allow-write'])
+    pid = None
+    try:
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as client:
+                await client.initialize()
+                assert 'open_window' in {tool.name for tool in (await client.list_tools()).tools}
+                result = await client.call_tool('open_window', {'project_file': str(FIXTURE.resolve())})
+                assert not result.isError, result.content
+                opened = json.loads(result.content[0].text)
+                pid = opened['pid']
+                assert process_alive(pid)
+        await asyncio.sleep(0.3)
+        assert process_alive(pid), 'MCP client process-job cleanup closed the GUI'
+    finally:
+        # This PID belongs only to the disposable window created by this test.
+        if pid and process_alive(pid):
+            os.kill(pid, signal.SIGTERM)
 
 
 async def test_native_edits_conflicts_atomicity_and_undo():

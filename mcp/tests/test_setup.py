@@ -19,9 +19,9 @@ spec.loader.exec_module(setup)
 
 def test_attach_configuration_uses_existing_window_mode(tmp_path):
     server = setup.server_config(tmp_path, read_only=True, attach=True)
-    assert server["args"] == ["-m", "aegisub_mcp.server", "--attach"]
+    assert server["args"] == ["-m", "aegisub_mcp.server", "--attach", "--aegisub", str(tmp_path / 'aegisub.exe')]
     server = setup.server_config(tmp_path, attach=True)
-    assert server["args"] == ["-m", "aegisub_mcp.server", "--attach", "--allow-write"]
+    assert server["args"] == ["-m", "aegisub_mcp.server", "--attach", "--aegisub", str(tmp_path / 'aegisub.exe'), "--allow-write"]
 
 
 @pytest.mark.parametrize("packaged", [False, True])
@@ -88,9 +88,10 @@ def test_server_config_paths_and_read_only(tmp_path):
     root = tmp_path / "日本語 and spaces"
     writable = setup.server_config(root)
     assert writable["command"] == str(root / ".venv/Scripts/python.exe")
-    assert writable["args"] == ["-m", "aegisub_mcp.server", "--aegisub",
+    assert writable["args"] == ["-m", "aegisub_mcp.server", "--attach", "--aegisub",
                                  str(root / "aegisub.exe"), "--allow-write"]
     assert setup.server_config(root, read_only=True)["args"] == writable["args"][:-1]
+    assert '--attach' not in setup.server_config(root, attach=False)['args']
 
 
 def test_failed_atomic_replace_preserves_settings(tmp_path, monkeypatch):

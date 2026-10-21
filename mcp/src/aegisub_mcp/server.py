@@ -128,6 +128,18 @@ def create_server(bridge: Bridge | SessionManager) -> FastMCP:
     delete = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False)
 
     if isinstance(bridge, SessionManager):
+        if bridge.executable is not None:
+            @server.tool(annotations=write)
+            async def open_window(project_file: Annotated[str, Field(min_length=1, max_length=32767)] | None = None) -> dict:
+                """Open one new Aegisub window only when explicitly requested, then connect to it.
+
+                Omit project_file for a blank document, or supply an absolute local subtitle path.
+                Existing windows and unsaved work stay open. Finish any first-run or linked-media
+                prompts in the GUI. Never automatically retry a failed or cancelled launch;
+                inspect list_sessions first. Client reconnects never invoke this tool automatically.
+                """
+                return await bridge.open_window(project_file)
+
         @server.tool(annotations=read)
         async def list_sessions() -> dict:
             """Find opt-in windows without launching another Aegisub process; never exposes session credentials."""
@@ -310,20 +322,22 @@ def create_server(bridge: Bridge | SessionManager) -> FastMCP:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--aegisub", type=Path, help="Launch the built MCP fork executable")
+    mode = parser.add_mutually_exclusive_group()
+    parser.add_argument("--aegisub", type=Path, help="Fork executable; with --attach, enables open_window without auto-launching")
     mode.add_argument("--attach", action="store_true", help="Connect to windows enabled through Aegisub's View menu")
     mode.add_argument("--list-sessions", action="store_true", help="Print enabled windows as JSON and exit")
     parser.add_argument("--project", type=Path, help="Optional subtitle file to open")
     parser.add_argument("--allow-write", action="store_true", help="Enable undoable edits and selection tools")
     args = parser.parse_args()
-    if args.project and not args.aegisub:
-        parser.error("--project is only supported with --aegisub")
+    if not (args.aegisub or args.attach or args.list_sessions):
+        parser.error('Specify --attach, --list-sessions, or --aegisub PATH')
+    if args.project and (args.attach or not args.aegisub):
+        parser.error("--project is only supported in launch mode; use open_window(project_file=...) in attach mode")
     if args.list_sessions:
         print(json.dumps({"sessions": list_sessions()}, ensure_ascii=False, indent=2))
         return
     try:
-        session = SessionManager(args.allow_write) if args.attach else LaunchedSession(args.aegisub, args.project, args.allow_write)
+        session = SessionManager(args.allow_write, executable=args.aegisub) if args.attach else LaunchedSession(args.aegisub, args.project, args.allow_write)
     except (OSError, ValueError) as exc:
         parser.exit(2, f"Cannot launch Aegisub: {exc}\n")
     try:

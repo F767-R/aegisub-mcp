@@ -14,6 +14,12 @@ video seeking, and bounded audio audition. Enable a window in **View > Agent
 connection**, then configure the server with `--attach`. Existing launch-mode
 configuration remains supported. A matching 0.3 native build is required.
 
+Server 0.3.1 adds an explicit `open_window` tool. Setup defaults to
+`--attach --aegisub PATH`: connecting/discovering tools never opens a GUI;
+the agent can open one window when requested. The new window survives client
+disconnects, including Windows clients that terminate MCP process jobs. Windows
+uses the local process provider to launch the requested GUI independently.
+
 See **[MCP setup and usage](docs/mcp.md)**. The integration consists of a native
 bridge in this fork plus a Python stdio server in `mcp/`. An upstream Aegisub
 binary does not contain the bridge. Normal launches leave MCP disabled.

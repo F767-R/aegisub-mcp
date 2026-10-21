@@ -13,13 +13,34 @@ upstream binary. On first launch, finish language/update prompts before calling 
 
    ```json
    {"mcpServers":{"aegisub":{"command":"C:/path/to/.venv/Scripts/python.exe",
-     "args":["-m","aegisub_mcp.server","--attach","--allow-write"]}}}
+     "args":["-m","aegisub_mcp.server","--attach","--aegisub","C:/path/to/aegisub.exe","--allow-write"]}}}
    ```
 
    Portable Windows setup also accepts `setup-mcp.cmd --attach`, or
    `setup-claude-desktop.cmd --attach`. Add `--read-only` for a read-only client.
 4. Ask the agent to use `list_sessions`, then `connect_session` with the intended
    window's ID. A single enabled window is selected automatically on the first read.
+
+### Open a new window on request (server 0.3.1)
+
+With `--attach --aegisub PATH`, the agent also receives `open_window`.
+Call `open_window()` for a blank document, or
+`open_window(project_file="C:/path/to/subtitles.ass")` to open an existing local
+subtitle file. Each explicit call creates one new window and connects to it;
+existing documents and unsaved work stay open. Native 0.3 builds are compatible.
+Tool discovery, enabling MCP, and client reconnects never invoke this tool.
+
+The window is created through a short-lived independent launcher. On Windows,
+the local process provider keeps it outside the MCP client's kill-on-close job;
+the base Python interpreter avoids extra venv redirector jobs. It therefore
+survives clients that terminate their process jobs on disconnect. Finish any first-run
+or linked-media prompts in the GUI. If a call fails or is cancelled, inspect
+`list_sessions` before retrying; a window might already have started.
+
+Windows setup now defaults to this mode. `--attach` without `--aegisub` remains
+supported for connecting only, and exposes no window-opening tool. Use
+`setup-mcp.cmd --launch-on-connect` only if you deliberately want the legacy
+behavior of opening a new GUI for every MCP connection.
 
 The client holds an exclusive OS lease, so two clients cannot overwrite each
 other's mailbox. Disconnecting or restarting the client releases that lease and
@@ -195,6 +216,7 @@ rather than a browser-only chat at claude.ai.
 | `list_lines` | Paginated subtitle text, timestamps, metadata, IDs and selection |
 | `list_styles` | Style names, structured properties, and full ASS definitions |
 | `list_sessions` / `connect_session` | Discover and select an enabled open window (attach mode) |
+| `open_window` | Open one new window on request, optionally with a local subtitle file (attach mode plus executable path) |
 | `get_context` / `wait_for_context` | Read or wait for selection, playhead, media and document context |
 | `render_preview` | Render the current unsaved subtitles over a video frame as a PNG image |
 | `seek_video` / `play_audio` / `stop_playback` | Control loaded media without editing subtitle content |
