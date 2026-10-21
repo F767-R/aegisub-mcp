@@ -10,6 +10,7 @@ import secrets
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 
 MAX_REQUEST = 4 * 1024 * 1024
 MAX_RESPONSE = 64 * 1024 * 1024
@@ -34,7 +35,8 @@ def atomic_json(path: Path, data: dict) -> None:
 
 class Bridge:
     def __init__(self, directory: Path, token: str, *, allow_write: bool = False,
-                 timeout: float = 15.0, process: subprocess.Popen | None = None):
+                 timeout: float = 15.0, process: subprocess.Popen | None = None,
+                 session_guard: Callable[[], None] | None = None):
         self.directory = directory
         self.token = token
         self.allow_write = allow_write
@@ -42,9 +44,12 @@ class Bridge:
         self.process = process
         self._lock = asyncio.Lock()
         self._failed = False
+        self.session_guard = session_guard
 
     def read_context(self) -> dict:
         """Native event snapshot: no mailbox request, including while a modal dialog is open."""
+        if self.session_guard:
+            self.session_guard()
         if self.process is not None and self.process.poll() is not None:
             raise BridgeError("Aegisub has exited")
         path = self.directory / "context.json"
@@ -62,6 +67,8 @@ class Bridge:
         if method in WRITE_METHODS and not self.allow_write:
             raise BridgeError("Read-only session; restart with --allow-write to edit")
         async with self._lock:
+            if self.session_guard:
+                self.session_guard()
             if self._failed:
                 raise BridgeError("Session disconnected after transport failure; restart the MCP server")
             if self.process is not None and self.process.poll() is not None:
@@ -79,6 +86,8 @@ class Bridge:
                 })
                 published = True
                 while time.monotonic() < deadline:
+                    if self.session_guard:
+                        self.session_guard()
                     if response_path.exists():
                         if response_path.stat().st_size > MAX_RESPONSE:
                             raise BridgeError("Response exceeds 64 MiB; request fewer lines")

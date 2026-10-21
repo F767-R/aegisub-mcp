@@ -33,6 +33,7 @@ public:
 	explicit McpBridge(agi::Context *context);
 	~McpBridge() override;
 	void Enable(bool writable);
+	void ReleaseClient();
 	void Disable();
 	bool IsActive() const { return IsRunning(); }
 	bool IsWritable() const { return allow_write; }

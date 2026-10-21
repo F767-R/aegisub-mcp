@@ -144,6 +144,7 @@ class SessionManager:
         self.lease: ClientLease | None = None
         self.session_id: str | None = None
         self._pending = 0
+        self._requires_connect = False
         self.executable = executable.resolve(strict=True) if executable else None
         if self.executable and not self.executable.is_file():
             raise ValueError('The Aegisub executable must be a file')
@@ -225,18 +226,44 @@ class SessionManager:
             raise
         self.close()
         self.lease, self.bridge, self.session_id = lease, bridge, session_id
+        self._requires_connect = False
+        bridge.session_guard = lambda: self._check_session(bridge)
         return context
+
+    def disconnect(self) -> dict:
+        if self._pending:
+            raise BridgeError("Wait for the current tool call to finish before disconnecting")
+        previous = self.session_id
+        self._requires_connect = True
+        self.close()
+        return {"disconnected": True, "previous_session_id": previous}
+
+    def _check_session(self, bridge: Bridge):
+        try:
+            data = read_session(bridge.directory)
+            if data["token"] != bridge.token:
+                raise BridgeError("Session credentials changed")
+        except (OSError, ValueError, BridgeError) as exc:
+            # Never let resource polling or a later tool silently reclaim a
+            # window after the user hands it to another agent. In-flight calls
+            # keep their lease until their own cleanup completes.
+            self._requires_connect = True
+            if not self._pending:
+                self.close()
+            raise BridgeError("Session credentials changed or agent disconnected. "
+                "Use list_sessions and explicitly connect_session to reconnect. "
+                "An in-flight request may have completed; inspect the document before retrying.") from exc
 
     def _connected(self) -> Bridge:
         if not self.bridge:
+            if self._requires_connect:
+                raise BridgeError("Agent disconnected; use list_sessions and explicitly connect_session to reconnect")
             sessions = self.list_sessions()
             if len(sessions) != 1:
                 raise BridgeError("Use list_sessions and connect_session to choose an enabled Aegisub window")
             self.connect(sessions[0]["session_id"])
         # Detect closed windows and credential rotation before publishing anything.
-        data = read_session(self.bridge.directory)
-        if data["token"] != self.bridge.token:
-            raise BridgeError("Session credentials changed; reconnect to the window")
+        self._check_session(self.bridge)
         return self.bridge
 
     async def call(self, method: str, args: dict | None = None) -> dict:
@@ -246,6 +273,8 @@ class SessionManager:
             return await bridge.call(method, args)
         finally:
             self._pending -= 1
+            if self._requires_connect and not self._pending:
+                self.close()
 
     def read_context(self) -> dict:
         return self._connected().read_context()

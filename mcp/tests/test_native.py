@@ -22,6 +22,89 @@ pytestmark = pytest.mark.skipif(not EXE, reason="Native fork executable not supp
 FIXTURE = Path(__file__).parent / "fixtures" / "example.ass"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Exercise the native Windows menu command")
+async def test_native_menu_handoff_preserves_unsaved_document_and_history():
+    import ctypes
+    from ctypes import wintypes
+
+    # Drive only this test's disposable GUI through its real menu command.
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    user.GetMenu.argtypes, user.GetMenu.restype = [wintypes.HWND], wintypes.HMENU
+    user.GetSubMenu.argtypes, user.GetSubMenu.restype = [wintypes.HMENU, ctypes.c_int], wintypes.HMENU
+    user.GetMenuItemCount.argtypes = [wintypes.HMENU]
+    user.GetMenuStringW.argtypes = [wintypes.HMENU, wintypes.UINT, wintypes.LPWSTR, ctypes.c_int, wintypes.UINT]
+    user.GetMenuItemID.argtypes, user.GetMenuItemID.restype = [wintypes.HMENU, ctypes.c_int], wintypes.UINT
+    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+
+    def find_command(menu):
+        for index in range(user.GetMenuItemCount(menu)):
+            label = ctypes.create_unicode_buffer(512)
+            user.GetMenuStringW(menu, index, label, len(label), 0x400)
+            if label.value.replace("&", "").startswith("Disconnect current agent (allow another)"):
+                return user.GetMenuItemID(menu, index)
+            child = user.GetSubMenu(menu, index)
+            if child:
+                result = find_command(child)
+                if result is not None:
+                    return result
+        return None
+
+    session = LaunchedSession(Path(EXE), FIXTURE, True)
+    first, second = SessionManager(True), SessionManager(True)
+    try:
+        session.bridge.timeout = 60
+        original = await session.bridge.call("list_lines", dict(offset=0, limit=100, selected_only=False))
+        changed = await session.bridge.call("update_lines", dict(expected_revision=original["revision"],
+            updates=[dict(id=original["lines"][0]["id"], text="Unsaved handoff")]))
+        session.close()
+        first.connect(session.directory.name)
+        found = []
+
+        @callback_type
+        def visit(window, unused):
+            pid = wintypes.DWORD()
+            user.GetWindowThreadProcessId(window, ctypes.byref(pid))
+            if pid.value == session.process.pid:
+                menu = user.GetMenu(window)
+                command = find_command(menu) if menu else None
+                if command is not None:
+                    found.append((window, command))
+            return True
+
+        user.EnumWindows(visit, 0)
+        assert len(found) == 1, "Handoff menu command missing from the native window"
+        assert user.PostMessageW(found[0][0], 0x111, found[0][1], 0)  # WM_COMMAND
+        async with asyncio.timeout(10):
+            while True:
+                replacements = [s for s in second.list_sessions()
+                    if s["pid"] == session.process.pid and s["session_id"] != session.directory.name]
+                if replacements:
+                    break
+                await asyncio.sleep(0.05)
+        with pytest.raises(BridgeError, match="disconnected"):
+            first.read_context()
+        current = second.connect(replacements[0]["session_id"])
+        assert current["modified"] and current["revision"] == changed["revision"]
+        assert session.process.poll() is None
+        lines = await second.call("list_lines", dict(offset=0, limit=100, selected_only=False))
+        assert lines["lines"][0]["text"] == "Unsaved handoff"
+        for _ in range(3):
+            with pytest.raises(BridgeError, match="explicitly connect_session"):
+                first.read_context()
+        await second.call("undo", dict(expected_revision=current["revision"]))
+        restored = await second.call("list_lines", dict(offset=0, limit=100, selected_only=False))
+        assert restored["lines"][0]["text"] == original["lines"][0]["text"]
+    finally:
+        first.close()
+        second.close()
+        session.process.terminate()
+        session.process.wait(timeout=10)
+        session.close()
+
+
 async def test_native_explicit_window_survives_stdio_client_cleanup():
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client

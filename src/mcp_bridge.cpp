@@ -296,6 +296,16 @@ void McpBridge::Disable() {
 	token.clear();
 }
 
+void McpBridge::ReleaseClient() {
+	if (!IsActive()) return;
+	// A new mailbox revokes the old client's credentials and isolates any
+	// outstanding requests/OS lease. The GUI and its document stay untouched.
+	Enable(allow_write);
+	ContextChanged();
+	PublishContext();
+	context->frame->StatusTimeout("Agent disconnected. Another agent can connect to this window.");
+}
+
 McpBridge::~McpBridge() { Disable(); }
 void McpBridge::Changed() { ++revision; ContextChanged(); }
 void McpBridge::ContextChanged() { ++context_version; context_dirty = true; }

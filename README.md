@@ -20,6 +20,13 @@ the agent can open one window when requested. The new window survives client
 disconnects, including Windows clients that terminate MCP process jobs. Windows
 uses the local process provider to launch the requested GUI independently.
 
+Version 0.3.2 adds **View > Disconnect current agent (allow another)**. It revokes
+the current client's connection while keeping the document open and agent access
+enabled. The other agent can use `list_sessions` and `connect_session` on demand.
+The disconnected client cannot reconnect through background polling; it must
+explicitly connect again. `disconnect_session` also lets an agent release its own
+connection. **Disable all agent access** keeps every client disconnected instead.
+
 See **[MCP setup and usage](docs/mcp.md)**. The integration consists of a native
 bridge in this fork plus a Python stdio server in `mcp/`. An upstream Aegisub
 binary does not contain the bridge. Normal launches leave MCP disabled.
