@@ -25,7 +25,8 @@ FIXTURE = Path(__file__).parent / "fixtures" / "example.ass"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Exercise the native Windows menu command")
-async def test_native_menu_handoff_preserves_unsaved_document_and_history():
+@pytest.mark.parametrize("handoff_ui", ["menu", "panel"])
+async def test_native_menu_handoff_preserves_unsaved_document_and_history(handoff_ui):
     import ctypes
     from ctypes import wintypes
 
@@ -38,14 +39,20 @@ async def test_native_menu_handoff_preserves_unsaved_document_and_history():
     user.GetMenuItemID.argtypes, user.GetMenuItemID.restype = [wintypes.HMENU, ctypes.c_int], wintypes.UINT
     user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
+        wintypes.LPARAM, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    user.EnumChildWindows.argtypes = [wintypes.HWND, callback_type, wintypes.LPARAM]
 
     def find_command(menu):
         for index in range(user.GetMenuItemCount(menu)):
             label = ctypes.create_unicode_buffer(512)
             user.GetMenuStringW(menu, index, label, len(label), 0x400)
-            if label.value.replace("&", "").startswith("Disconnect current agent (allow another)"):
+            wanted = "Agent connection status" if handoff_ui == "panel" else "Disconnect current agent (allow another)"
+            if label.value.replace("&", "").startswith(wanted):
                 return user.GetMenuItemID(menu, index)
             child = user.GetSubMenu(menu, index)
             if child:
@@ -62,6 +69,7 @@ async def test_native_menu_handoff_preserves_unsaved_document_and_history():
         changed = await session.bridge.call("update_lines", dict(expected_revision=original["revision"],
             updates=[dict(id=original["lines"][0]["id"], text="Unsaved handoff")]))
         session.close()
+        first.set_client_info("Codex panel test", "0.4")
         first.connect(session.directory.name)
         found = []
 
@@ -79,6 +87,41 @@ async def test_native_menu_handoff_preserves_unsaved_document_and_history():
         user.EnumWindows(visit, 0)
         assert len(found) == 1, "Handoff menu command missing from the native window"
         assert user.PostMessageW(found[0][0], 0x111, found[0][1], 0)  # WM_COMMAND
+        if handoff_ui == "panel":
+            dialogs = []
+
+            @callback_type
+            def find_panel(window, unused):
+                pid = wintypes.DWORD()
+                user.GetWindowThreadProcessId(window, ctypes.byref(pid))
+                title = ctypes.create_unicode_buffer(256)
+                user.GetWindowTextW(window, title, len(title))
+                if pid.value == session.process.pid and title.value == "Agent connection":
+                    dialogs.append(window)
+                return True
+
+            async with asyncio.timeout(10):
+                while not dialogs:
+                    user.EnumWindows(find_panel, 0)
+                    await asyncio.sleep(0.05)
+            controls, displayed = [], []
+
+            @callback_type
+            def find_controls(window, unused):
+                title = ctypes.create_unicode_buffer(8192)
+                result = ctypes.c_size_t()
+                if user.SendMessageTimeoutW(window, 0xD, len(title), ctypes.addressof(title), 2, 2000, ctypes.byref(result)):
+                    displayed.append(title.value)
+                    if title.value == "Disconnect agent":
+                        controls.append(window)
+                return True
+
+            user.EnumChildWindows(dialogs[0], find_controls, 0)
+            assert any("Codex panel test" in text and "unsaved changes" in text for text in displayed), displayed
+            assert len(controls) == 1
+            # The panel is modeless: mailbox reads still work while it is open.
+            assert (await first.call("get_document"))["modified"]
+            assert user.PostMessageW(controls[0], 0xF5, 0, 0)  # BM_CLICK
         async with asyncio.timeout(10):
             while True:
                 replacements = [s for s in second.list_sessions()
@@ -99,6 +142,8 @@ async def test_native_menu_handoff_preserves_unsaved_document_and_history():
         await second.call("undo", dict(expected_revision=current["revision"]))
         restored = await second.call("list_lines", dict(offset=0, limit=100, selected_only=False))
         assert restored["lines"][0]["text"] == original["lines"][0]["text"]
+        if handoff_ui == "panel":
+            assert user.PostMessageW(dialogs[0], 0x10, 0, 0)  # WM_CLOSE
     finally:
         first.close()
         second.close()

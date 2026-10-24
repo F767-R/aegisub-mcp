@@ -37,6 +37,7 @@ DialogAgent::DialogAgent(agi::Context *c)
 
 void DialogAgent::RefreshStatus() {
 	auto bridge = context->frame->GetMcpBridge();
+	if (!bridge) return; // The parent may already be shutting down.
 	auto info = bridge->AgentStatus();
 	auto text = [&](char const *key) { return wxString::FromUTF8(static_cast<json::String const&>(info.at(key))); };
 	auto access = text("access");
