@@ -1,6 +1,6 @@
 # Aegisub MCP
 
-This fork lets an MCP client work with a live Aegisub document. Version **0.3.2**
+This fork lets an MCP client work with a live Aegisub document. Version **0.4.0**
 supports both launching a dedicated window and connecting to an already-open
 window that you enable in the fork's View menu. It cannot attach to an unmodified
 upstream binary. On first launch, finish language/update prompts before calling tools.
@@ -103,11 +103,64 @@ editor's loaded media. These controls require editing access and a current
 document revision, but do not create subtitle Undo steps. Media opening stays in
 the GUI.
 
+## Agent status and reviewed batches (0.4)
+
+Use **View > Agent connection status...** for a modeless panel with access controls,
+the connected client's self-reported name/version, verified OS-lease ownership,
+last command/error, and pending proposal labels. A stale identity file after a
+client crash does not count as ownership. `get_agent_status` exposes the same
+diagnostics; neither can certify tool availability inside the agent conversation.
+The panel can release ownership, disable access, or change read/edit access while
+preserving the open document. Changing access rotates the session; reconnect explicitly.
+
+For an operation spanning several edits:
+
+1. Read `get_context` and generate a fresh 32-character lowercase hexadecimal
+   `operation_id`. Retain the ID before sending a request.
+2. Call `propose_batch(operation_id, expected_revision, label, operations)`.
+   Operations are ordered objects with `method` and the usual edit arguments,
+   without an inner revision. Supported methods are `create_lines`, `update_lines`,
+   `delete_lines`, `shift_times`, `create_style`, and `update_style`.
+3. Review the returned `changes` and `style_changes` before/after records. A new
+   style may be used by later operations in the same batch. A style change can
+   affect every line using it, including lines not in the explicit line diff.
+   `render_preview(operation_id=..., time_ms=...)` renders the proposal separately
+   and restores the live renderer. It requires loaded video or dummy video.
+4. Apply the reviewed proposal with `apply_batch(operation_id, expected_revision)`.
+   It creates one Undo entry for the entire batch. Edits or saves since preparation
+   invalidate the proposal. `cancel_batch` discards a pending proposal only.
+
+Example operations:
+
+```json
+[
+  {"method":"create_style","name":"Highlight","properties":{"font_size":60}},
+  {"method":"update_lines","updates":[{"id":42,"style":"Highlight"}]},
+  {"method":"shift_times","ids":[42],"delta_ms":100}
+]
+```
+
+After a timeout or disconnect, reconnect explicitly and call
+`get_operation(operation_id)` before doing anything else. A repeated `apply_batch`
+for an applied ID returns its receipt without changing the document, even after
+Undo or client handoff. Identical proposal retries also return the existing record;
+reusing an ID with different content fails. `status=unknown` is not proof that an
+edit never happened: check the returned `window_id` and current document.
+
+Recovery history lives in the native window, not in the client process. It survives
+handoff and access-mode changes but ends when that window exits. It does not provide
+disk-persistent crash recovery. Limits: 50 operations / 500 total edits per batch,
+1 MiB proposal request, four pending document copies, and 128 retained records or
+16 MiB of request/diff history per window. History is never silently evicted;
+reaching a limit rejects a new proposal. Applied receipts describe the historical
+commit, not whether a later Undo has reversed it. Cancel does not undo an applied batch.
+
 ## Setup
 
 This server requires a **0.3 or newer native build** for session
 discovery, live context, and previews. Older Windows releases do not contain these
 features; update both the application and Python server together.
+Agent status and reviewed batches require the matching **0.4 native build**.
 See [Windows build and monitoring instructions](build-mcp-windows.md) to build
 the current branch and follow its progress yourself.
 

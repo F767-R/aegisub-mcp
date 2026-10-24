@@ -56,6 +56,7 @@ aegisub_src = files(
     'compat.cpp',
     'context.cpp',
     'dialog_about.cpp',
+    'dialog_agent.cpp',
     'dialog_attachments.cpp',
     'dialog_automation.cpp',
     'dialog_autosave.cpp',

@@ -24,6 +24,7 @@ async def test_protocol_initialize_discovery_and_call():
             "shift_times", "select_lines", "undo", "redo",
             "create_lines", "delete_lines", "create_style", "update_style",
             "get_context", "wait_for_context", "render_preview", "seek_video", "play_audio", "stop_playback",
+            "get_agent_status", "get_operation", "propose_batch", "apply_batch", "cancel_batch",
         }
         assert next(t for t in tools if t.name == "get_document").annotations.readOnlyHint
         assert next(t for t in tools if t.name == "delete_lines").annotations.destructiveHint
@@ -40,7 +41,8 @@ async def test_read_only_discovery_and_unknown_tool():
     bridge = RecordingBridge(False)
     async with create_connected_server_and_client_session(create_server(bridge)) as client:
         assert {t.name for t in (await client.list_tools()).tools} == {
-            "get_document", "list_lines", "list_styles", "get_context", "wait_for_context", "render_preview"}
+            "get_document", "list_lines", "list_styles", "get_context", "wait_for_context", "render_preview",
+            "get_agent_status", "get_operation"}
         result = await client.call_tool("undo", {"expected_revision": 1})
         assert result.isError
         assert not bridge.calls

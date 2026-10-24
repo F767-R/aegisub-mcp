@@ -9,11 +9,13 @@ import asyncio
 import json
 import signal
 import sys
+import time
+import uuid
 from pathlib import Path
 
 import pytest
 
-from aegisub_mcp.bridge import BridgeError, LaunchedSession
+from aegisub_mcp.bridge import BridgeError, LaunchedSession, atomic_json
 from aegisub_mcp.sessions import SessionManager
 from aegisub_mcp.sessions import process_alive
 
@@ -332,6 +334,113 @@ async def test_native_layered_effects_styles_and_history():
         await bridge.call("undo", dict(expected_revision=cleared["revision"]))
         assert [line["text"] for line in (await lines())["lines"]] == ["Hello", "World"]
     finally:
+        session.process.terminate()
+        session.process.wait(timeout=10)
+        session.close()
+
+
+async def test_native_review_batches_lost_response_handoff_and_single_undo(tmp_path):
+    fixture = tmp_path / "batch-preview.ass"
+    source = FIXTURE.read_text(encoding="utf-8")
+    source = source.replace("PlayResY: 1080", "PlayResY: 1080\nLayoutResX: 1920\nLayoutResY: 1080\nYCbCr Matrix: None")
+    source = source.replace("[V4+ Styles]", "[Aegisub Project Garbage]\nVideo File: ?dummy:25:250:1920:1080:0:0:0:\n\n[V4+ Styles]")
+    fixture.write_text(source, encoding="utf-8")
+    session = LaunchedSession(Path(EXE), fixture, True)
+    session.bridge.timeout = 60
+    bridge = session.bridge
+    manager = SessionManager(True, session.directory.parent)
+    async def lines(target=bridge):
+        return await target.call("list_lines", dict(offset=0, limit=100, selected_only=False))
+    try:
+        original = await lines()
+        first, second = [line["id"] for line in original["lines"]]
+        rev = original["revision"]
+        document = await bridge.call("get_document")
+        bridge.set_client_info("Codex test", "0.4")
+        status = await bridge.call("get_agent_status")
+        assert status["ownership"] == "connected"
+        assert status["client_name"] == "Codex test" and status["native_ready"]
+        operation = dict(operation_id=uuid.uuid4().hex, expected_revision=rev, label="Reviewed effect",
+            operations=[
+                dict(method="create_style", name="Draft", properties={"font_size": 140}),
+                dict(method="update_lines", updates=[dict(id=first, text="PROPOSED", style="Draft")]),
+                dict(method="shift_times", ids=[first], delta_ms=100),
+                dict(method="delete_lines", ids=[second]),
+                dict(method="create_lines", lines=[dict(text="New row", start_ms=4000, end_ms=5000, style="Draft")]),
+            ])
+        prepared = await bridge.call("propose_batch", operation)
+        assert prepared["status"] == "prepared" and prepared["revision"] == rev
+        assert (await lines()) == original
+        assert (await bridge.call("get_document")) == document
+        assert (await bridge.call("propose_batch", operation)) == prepared
+        with pytest.raises(BridgeError, match="different proposal"):
+            await bridge.call("propose_batch", dict(operation, label="Changed"))
+        # Invalid final operation must not leak preceding staged edits.
+        bad = dict(operation, operation_id=uuid.uuid4().hex,
+            operations=operation["operations"] + [dict(method="update_lines", updates=[dict(id=2147483647, text="bad")])])
+        with pytest.raises(BridgeError, match="Unknown subtitle"):
+            await bridge.call("propose_batch", bad)
+        assert (await lines()) == original
+        preview_args = dict(time_ms=1500, max_width=320, max_height=180, raw=False)
+        before = await bridge.call("render_preview", preview_args)
+        after = await bridge.call("render_preview", dict(preview_args, operation_id=operation["operation_id"]))
+        assert before["png_base64"] != after["png_base64"]
+        assert (await bridge.call("render_preview", preview_args))["png_base64"] == before["png_base64"]
+        assert (await lines()) == original
+        cancelled = dict(operation, operation_id=uuid.uuid4().hex)
+        await bridge.call("propose_batch", cancelled)
+        assert (await bridge.call("cancel_batch", {"operation_id": cancelled["operation_id"]}))["status"] == "cancelled"
+        with pytest.raises(BridgeError, match="cancelled or stale"):
+            await bridge.call("apply_batch", dict(operation_id=cancelled["operation_id"], expected_revision=rev))
+        assert (await lines()) == original
+        # Publish an application, then deliberately discard its response before a
+        # client consumes it. The next process must recover from native history.
+        request_id = uuid.uuid4().hex
+        atomic_json(session.directory / "request.json", dict(id=request_id, token=bridge.token,
+            method="apply_batch", args=dict(operation_id=operation["operation_id"], expected_revision=rev),
+            expires_ms=int((time.time() + 60) * 1000)))
+        response = session.directory / f"{request_id}.json"
+        async with asyncio.timeout(60):
+            while not response.exists():
+                await asyncio.sleep(0.05)
+        response.unlink()
+        session.close()
+        manager.set_client_info("Claude test", "0.4")
+        manager.connect(session.directory.name)
+        receipt = await manager.call("get_operation", dict(operation_id=operation["operation_id"]))
+        assert receipt["status"] == "applied"
+        assert receipt["applied_revision"] == rev + 1
+        assert receipt["window_id"] == document["window_id"]
+        status = await manager.call("get_agent_status")
+        assert status["client_name"] == "Claude test" and status["ownership"] == "connected"
+        applied = await lines(manager)
+        assert [line["text"] for line in applied["lines"]] == ["PROPOSED", "New row"]
+        assert applied["lines"][0]["id"] == first
+        assert applied["lines"][0]["start_ms"] == 1100
+        repeated = await manager.call("apply_batch", dict(operation_id=operation["operation_id"], expected_revision=rev))
+        assert repeated["applied_revision"] == receipt["applied_revision"]
+        assert await lines(manager) == applied
+        await manager.call("undo", dict(expected_revision=applied["revision"]))
+        undone = await lines(manager)
+        assert undone["lines"] == original["lines"]
+        assert [style["name"] for style in (await manager.call("list_styles"))["styles"]] == ["Default"]
+        # Retry after Undo must return history, not replay the application.
+        await manager.call("apply_batch", dict(operation_id=operation["operation_id"], expected_revision=undone["revision"]))
+        assert await lines(manager) == undone
+        await manager.call("redo", dict(expected_revision=undone["revision"]))
+        assert (await lines(manager))["lines"] == applied["lines"]
+        current = await lines(manager)
+        stale = dict(operation, operation_id=uuid.uuid4().hex, expected_revision=current["revision"],
+                     operations=[dict(method="update_lines", updates=[dict(id=first, text="Stale")])])
+        await manager.call("propose_batch", stale)
+        await manager.call("update_lines", dict(expected_revision=current["revision"], updates=[dict(id=first, text="Manual edit")]))
+        with pytest.raises(BridgeError, match="cancelled or stale"):
+            await manager.call("apply_batch", dict(operation_id=stale["operation_id"], expected_revision=stale["expected_revision"]))
+        assert (await lines(manager))["lines"][0]["text"] == "Manual edit"
+        assert (await manager.call("get_operation", dict(operation_id=stale["operation_id"])))["status"] == "stale"
+        assert (await manager.call("get_operation", dict(operation_id=uuid.uuid4().hex)))["status"] == "unknown"
+    finally:
+        manager.close()
         session.process.terminate()
         session.process.wait(timeout=10)
         session.close()

@@ -14,9 +14,10 @@ from collections.abc import Callable
 
 MAX_REQUEST = 4 * 1024 * 1024
 MAX_RESPONSE = 64 * 1024 * 1024
-READ_METHODS = frozenset({"get_document", "list_lines", "list_styles", "get_context", "render_preview"})
+READ_METHODS = frozenset({"get_document", "list_lines", "list_styles", "get_context", "render_preview", "get_agent_status", "get_operation"})
 WRITE_METHODS = frozenset({"update_lines", "create_lines", "delete_lines", "create_style", "update_style",
-                           "shift_times", "select_lines", "undo", "redo", "seek_video", "play_audio", "stop_playback"})
+                           "shift_times", "select_lines", "undo", "redo", "seek_video", "play_audio", "stop_playback",
+                           "propose_batch", "apply_batch", "cancel_batch"})
 
 
 class BridgeError(RuntimeError):
@@ -45,6 +46,11 @@ class Bridge:
         self._lock = asyncio.Lock()
         self._failed = False
         self.session_guard = session_guard
+        self.client_lease = None
+
+    def set_client_info(self, name: str, version: str):
+        if self.client_lease:
+            self.client_lease.set_client_info(name, version)
 
     def read_context(self) -> dict:
         """Native event snapshot: no mailbox request, including while a modal dialog is open."""
@@ -153,6 +159,7 @@ class LaunchedSession:
             self.directory.rmdir()
             raise
         self.bridge = Bridge(self.directory, token, allow_write=allow_write, process=self.process)
+        self.bridge.client_lease = self._lease
 
     def close(self) -> None:
         # Disconnect only this client. Native access remains opt-in and can be

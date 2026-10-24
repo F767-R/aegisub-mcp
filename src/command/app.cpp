@@ -37,6 +37,7 @@
 
 #include "../compat.h"
 #include "../dialog_detached_video.h"
+#include "../dialog_agent.h"
 #include "../dialog_manager.h"
 #include "../dialogs.h"
 #include "../frame_main.h"
@@ -50,6 +51,14 @@
 
 namespace {
 	using cmd::Command;
+
+struct app_agent_status final : public Command {
+	CMD_NAME("app/agent/status")
+	STR_MENU("Agent connection status...")
+	STR_DISP("Agent connection status")
+	STR_HELP("Show the connected agent, recent commands and access controls")
+	void operator()(agi::Context *c) override { c->dialog->Show<DialogAgent>(c); }
+};
 
 struct app_agent_read final : public Command {
 	CMD_NAME("app/agent/read")
@@ -389,6 +398,7 @@ struct app_show_all final : public Command {
 
 namespace cmd {
 	void init_app() {
+		reg(std::make_unique<app_agent_status>());
 		reg(std::make_unique<app_agent_read>());
 		reg(std::make_unique<app_agent_write>());
 		reg(std::make_unique<app_agent_release>());

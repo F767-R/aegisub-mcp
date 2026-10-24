@@ -10,7 +10,7 @@ import sys
 import subprocess
 import tempfile
 
-from .bridge import Bridge, BridgeError
+from .bridge import Bridge, BridgeError, atomic_json
 
 SESSION_ID = re.compile(r"[0-9a-f]{32}")
 
@@ -92,6 +92,8 @@ def read_session(directory: Path) -> dict:
 class ClientLease:
     """One client per window, including across separate MCP server processes."""
     def __init__(self, directory: Path):
+        self.directory = directory
+        self.identity = None
         self.file = (directory / "client.lock").open("a+b")
         try:
             if os.name == "nt":
@@ -108,9 +110,28 @@ class ClientLease:
         except OSError as exc:
             self.file.close()
             raise BridgeError("This Aegisub window is already connected to another MCP client") from exc
+        try:
+            self.set_client_info("MCP client", "")
+        except BaseException:
+            self.file.close()
+            raise
+
+    def set_client_info(self, name: str, version: str):
+        # Metadata is descriptive, never a credential or proof of ownership.
+        clean = lambda value: ''.join(c for c in str(value) if c.isprintable())[:128]
+        identity = (clean(name), clean(version))
+        if identity != self.identity:
+            atomic_json(self.directory / "client.json", dict(name=identity[0], version=identity[1], pid=os.getpid()))
+            self.identity = identity
 
     def close(self):
         # Closing the descriptor releases the lock even after a client crashes.
+        if self.file.closed:
+            return
+        try:
+            (self.directory / "client.json").unlink(missing_ok=True)
+        except OSError:
+            pass  # Native status verifies the OS lock, never this file alone.
         self.file.close()
 
 
@@ -146,6 +167,7 @@ class SessionManager:
         self._pending = 0
         self._requires_connect = False
         self.executable = executable.resolve(strict=True) if executable else None
+        self.client_info = ("MCP client", "")
         if self.executable and not self.executable.is_file():
             raise ValueError('The Aegisub executable must be a file')
 
@@ -218,6 +240,7 @@ class SessionManager:
             self.close()
         lease = ClientLease(directory)
         try:
+            lease.set_client_info(*self.client_info)
             bridge = Bridge(directory, data["token"], allow_write=self.allow_write)
             # Validate before releasing a previously selected window.
             context = bridge.read_context()
@@ -229,6 +252,11 @@ class SessionManager:
         self._requires_connect = False
         bridge.session_guard = lambda: self._check_session(bridge)
         return context
+
+    def set_client_info(self, name: str, version: str):
+        self.client_info = (name, version)
+        if self.lease:
+            self.lease.set_client_info(name, version)
 
     def disconnect(self) -> dict:
         if self._pending:

@@ -28,16 +28,66 @@
 #include <memory>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 #include <wx/utils.h>
 #include <wx/base64.h>
 #include <wx/image.h>
 #include <wx/mstream.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 namespace {
 constexpr int64_t max_time = 35999990; // ASS: 9:59:59.99
 constexpr size_t max_message = 4 * 1024 * 1024;
+
+int64_t Now() {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::string Serialize(json::Object const& value) {
+	std::ostringstream stream;
+	agi::JsonWriter::Write(value, stream);
+	return stream.str();
+}
+
+std::string OperationId(json::UnknownElement const& value) {
+	std::string id = value;
+	if (id.size() != 32 || id.find_first_not_of("0123456789abcdef") != std::string::npos)
+		throw std::runtime_error("operation_id must be 32 lowercase hexadecimal characters");
+	return id;
+}
+
+// Probe the same OS lock as Python. A leftover metadata file after a crash is
+// not proof of ownership. Return -1 when ownership cannot be verified.
+int LeaseHeld(agi::fs::path const& path) {
+#ifdef _WIN32
+	auto file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+	if (file == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : -1;
+	OVERLAPPED overlapped{};
+	bool acquired = LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped);
+	auto error = GetLastError();
+	if (acquired) UnlockFileEx(file, 0, 1, 0, &overlapped);
+	CloseHandle(file);
+	return acquired ? 0 : error == ERROR_LOCK_VIOLATION ? 1 : -1;
+#else
+	auto file = open(path.c_str(), O_RDWR);
+	if (file < 0) return errno == ENOENT ? 0 : -1;
+	bool acquired = flock(file, LOCK_EX | LOCK_NB) == 0;
+	auto error = errno;
+	if (acquired) flock(file, LOCK_UN);
+	close(file);
+	return acquired ? 0 : (error == EWOULDBLOCK || error == EAGAIN) ? 1 : -1;
+#endif
+}
 
 agi::fs::path Registry() {
 	wxString root;
@@ -220,6 +270,7 @@ void Patch(AssDialogueBase& line, json::Object const& patch, AssFile *ass) {
 }
 
 McpBridge::McpBridge(agi::Context *context) : context(context) {
+	window_id = Secret(16);
 	BindConnection(context->ass->AddCommitListener(&McpBridge::Changed, this));
 	BindConnection(context->subsController->AddFileOpenListener(&McpBridge::Changed, this));
 	BindConnection(context->subsController->AddFileSaveListener(&McpBridge::Changed, this));
@@ -307,7 +358,16 @@ void McpBridge::ReleaseClient() {
 }
 
 McpBridge::~McpBridge() { Disable(); }
-void McpBridge::Changed() { ++revision; ContextChanged(); }
+void McpBridge::Changed() {
+	++revision;
+	for (auto& [id, batch] : batches) {
+		if (batch.status == "prepared") {
+			batch.status = "stale";
+			batch.staged.reset();
+		}
+	}
+	ContextChanged();
+}
 void McpBridge::ContextChanged() { ++context_version; context_dirty = true; }
 
 json::Object McpBridge::Context() {
@@ -356,6 +416,49 @@ void McpBridge::PublishContext() {
 	catch (...) { /* A transient read lock must not disrupt the GUI. Retry next tick. */ }
 }
 
+json::Object McpBridge::AgentStatus() {
+	json::Object out;
+	out["window_id"] = window_id;
+	out["session_id"] = directory.filename().string();
+	out["access"] = !IsActive() ? "disabled" : allow_write ? "editing" : "read_only";
+	out["filename"] = context->subsController->Filename().string();
+	out["modified"] = context->subsController->IsModified();
+	out["revision"] = revision;
+	out["native_ready"] = IsActive() && context->frame->IsEnabled();
+	out["last_command"] = last_command;
+	out["last_error"] = last_error;
+	out["last_success_ms"] = last_success_ms;
+	out["tool_availability"] = "unknown (managed by the agent client)";
+	auto held = directory.empty() ? 0 : LeaseHeld(directory / "client.lock");
+	out["ownership"] = held < 0 ? "unknown" : held ? "connected" : "available";
+	out["client_name"] = held ? "Unknown client" : "None";
+	out["client_version"] = "";
+	if (held == 1) {
+		try {
+			auto path = directory / "client.json";
+			if (std::filesystem::is_symlink(path) || std::filesystem::file_size(path) > 4096)
+				throw std::runtime_error("Invalid client metadata");
+			std::ifstream input(path, std::ios::binary);
+			auto data = agi::json_util::parse(input);
+			json::Object const& client = data;
+			out["client_name"] = String(client.at("name"));
+			out["client_version"] = String(client.at("version"));
+			out["client_pid"] = Integer(client.at("pid"), 1, INT64_MAX);
+		} catch (...) { /* Identity is optional; never infer it from a stale file. */ }
+	}
+	json::Array pending;
+	for (auto const& [id, batch] : batches) {
+		if (batch.status == "prepared") {
+			json::Object item;
+			item["operation_id"] = id;
+			item["label"] = batch.label;
+			pending.emplace_back(std::move(item));
+		}
+	}
+	out["pending_batches"] = std::move(pending);
+	return out;
+}
+
 void McpBridge::Notify() {
 	// Modal tools can hold pointers into the document. Do not change it under them.
 	if (busy || !context->frame->IsEnabled()) return;
@@ -391,9 +494,13 @@ void McpBridge::Notify() {
 			std::chrono::system_clock::now().time_since_epoch()).count();
 		if (Integer(envelope.at("expires_ms"), 0, INT64_MAX) < now)
 			throw std::runtime_error("Request expired; no changes applied");
-		response["result"] = Dispatch(envelope.at("method"), envelope.at("args"));
+		std::string method = envelope.at("method");
+		// Status reads must not hide the last meaningful command or its failure.
+		if (method != "get_agent_status") last_command = method;
+		response["result"] = Dispatch(method, envelope.at("args"));
+		if (method != "get_agent_status") { last_success_ms = Now(); last_error.clear(); }
 	}
-	catch (std::exception const& e) { response["error"] = std::string(e.what()); }
+	catch (std::exception const& e) { last_error = e.what(); response["error"] = last_error; }
 	catch (...) { response["error"] = "Aegisub bridge failure"; }
 	std::filesystem::remove(request, ec);
 	// Never interpolate unvalidated input into a path, even on the error path.
@@ -410,15 +517,251 @@ void McpBridge::Notify() {
 	catch (...) { Stop(); } // Fail closed after transport loss; never retry a mutation.
 }
 
+json::Object McpBridge::BatchCommand(std::string const& method, json::Object const& args) {
+	auto id = OperationId(args.at("operation_id"));
+	if (method == "propose_batch") Keys(args, {"operation_id", "expected_revision", "label", "operations"});
+	else if (method == "apply_batch") Keys(args, {"operation_id", "expected_revision"});
+	else Keys(args, {"operation_id"});
+	auto found = batches.find(id);
+	if (method != "get_operation" && !allow_write) throw std::runtime_error("Read-only session");
+	if (method == "propose_batch" && found != batches.end()) {
+		if (found->second.request != Serialize(args)) throw std::runtime_error("operation_id already used for a different proposal");
+	}
+	else if (method == "propose_batch") {
+		if (Integer(args.at("expected_revision"), 1, INT64_MAX) != revision)
+			throw std::runtime_error("Document revision conflict; rebuild the proposal");
+		if (batches.size() >= 128) throw std::runtime_error("Window operation history is full (128); no receipts are evicted. Use a new window.");
+		size_t pending = 0;
+		for (auto const& [key, value] : batches) if (value.staged) ++pending;
+		if (pending >= 4) throw std::runtime_error("Cancel or apply an existing proposal first (maximum 4 pending)");
+		Batch batch;
+		batch.base_revision = revision;
+		batch.label = String(args.at("label"));
+		if (batch.label.empty() || batch.label.size() > 128) throw std::runtime_error("Label must be 1 to 128 UTF-8 bytes");
+		batch.request = Serialize(args);
+		if (batch.request.size() > 1024 * 1024) throw std::runtime_error("Proposal exceeds 1 MiB; use a smaller batch");
+		batch.staged = std::make_unique<AssFile>(*context->ass);
+		auto& staged = *batch.staged;
+		// AssFile's normal copy assigns new IDs. A proposal must retain live IDs.
+		auto original = context->ass->Events.begin();
+		for (auto& line : staged.Events) { line.Id = original->Id; ++original; }
+		staged.Properties = context->ass->Properties;
+		json::Array const& operations = args.at("operations");
+		if (operations.empty() || operations.size() > 50) throw std::runtime_error("Supply 1 to 50 operations");
+		size_t total = 0;
+		std::set<int> touched;
+		std::set<std::string> styles;
+		json::Array created_ids;
+		for (auto const& operation : operations) {
+			json::Object const& op = operation;
+			std::string kind = op.at("method");
+			auto lookup = [&](json::UnknownElement const& value) -> AssDialogue * {
+				int key = int(Integer(value, 0, 2147483647));
+				for (auto& line : staged.Events) if (line.Id == key) return &line;
+				throw std::runtime_error("Unknown subtitle ID in proposal");
+			};
+			auto count = [&](size_t size) {
+				if (!size || (total += size) > 500) throw std::runtime_error("Batch must contain 1 to 500 total edits");
+			};
+			if (kind == "create_style" || kind == "update_style") {
+				if (kind == "create_style") Keys(op, {"method", "name", "properties", "base_style"});
+				else Keys(op, {"method", "name", "properties"});
+				count(1);
+				auto name = StyleName(op.at("name"));
+				json::Object const& properties = op.at("properties");
+				auto current = staged.GetStyle(name);
+				if (kind == "create_style") {
+					for (auto const& style : staged.Styles)
+						if (wxString::FromUTF8(style.name).CmpNoCase(wxString::FromUTF8(name)) == 0)
+							throw std::runtime_error("Style name already exists (case-insensitive)");
+					std::unique_ptr<AssStyle> copy;
+					if (op.count("base_style")) {
+						auto base = staged.GetStyle(StyleName(op.at("base_style")));
+						if (!base) throw std::runtime_error("Unknown base style");
+						copy = std::make_unique<AssStyle>(*base);
+					} else copy = std::make_unique<AssStyle>();
+					copy->name = name;
+					PatchStyle(*copy, properties);
+					staged.Styles.push_back(*copy.release());
+				} else {
+					if (!current || properties.empty()) throw std::runtime_error("Unknown style or empty style update");
+					PatchStyle(*current, properties);
+				}
+				styles.insert(name);
+			}
+			else if (kind == "create_lines") {
+				Keys(op, {"method", "lines", "after_id"});
+				json::Array const& lines = op.at("lines");
+				count(lines.size());
+				auto position = staged.Events.end();
+				if (op.count("after_id")) position = ++staged.iterator_to(*lookup(op.at("after_id")));
+				for (auto const& value : lines) {
+					json::Object const& patch = value;
+					Keys(patch, {"text", "start_ms", "end_ms", "style", "actor", "effect", "layer", "comment"});
+					String(patch.at("text"));
+					Integer(patch.at("start_ms"), 0, max_time);
+					Integer(patch.at("end_ms"), 0, max_time);
+					auto line = std::make_unique<AssDialogue>();
+					Patch(*line, patch, &staged);
+					if (!staged.GetStyle(line->Style.get())) throw std::runtime_error("Unknown style");
+					touched.insert(line->Id);
+					created_ids.emplace_back(line->Id);
+					staged.Events.insert(position, *line.release());
+				}
+			}
+			else if (kind == "update_lines") {
+				Keys(op, {"method", "updates"});
+				json::Array const& updates = op.at("updates");
+				count(updates.size());
+				std::set<int> seen;
+				for (auto const& update : updates) {
+					json::Object const& patch = update;
+					auto line = lookup(patch.at("id"));
+					if (patch.size() < 2 || !seen.insert(line->Id).second) throw std::runtime_error("Empty update or duplicate subtitle ID");
+					Patch(*line, patch, &staged);
+					touched.insert(line->Id);
+				}
+			}
+			else if (kind == "delete_lines" || kind == "shift_times") {
+				if (kind == "delete_lines") Keys(op, {"method", "ids"});
+				else Keys(op, {"method", "ids", "delta_ms"});
+				json::Array const& ids = op.at("ids");
+				count(ids.size());
+				std::set<int> seen;
+				for (auto const& value : ids) {
+					auto line = lookup(value);
+					if (!seen.insert(line->Id).second) throw std::runtime_error("Duplicate subtitle ID");
+					touched.insert(line->Id);
+					if (kind == "delete_lines") {
+						staged.Events.erase(staged.iterator_to(*line));
+						delete line;
+					} else {
+						auto delta = Integer(op.at("delta_ms"), -max_time, max_time);
+						if (delta % 10 || int(line->Start) + delta < 0 || int(line->End) + delta < 0 ||
+							int(line->Start) + delta > max_time || int(line->End) + delta > max_time)
+							throw std::runtime_error("Invalid shift or timestamp outside ASS range");
+						line->Start = int(int(line->Start) + delta);
+						line->End = int(int(line->End) + delta);
+					}
+				}
+			}
+			else throw std::runtime_error("Unsupported batch operation; use subtitle/style edits only");
+		}
+		if (staged.Events.empty()) {
+			auto blank = new AssDialogue;
+			staged.Events.push_back(*blank);
+			touched.insert(blank->Id);
+			created_ids.emplace_back(blank->Id);
+		}
+		json::Array changes;
+		for (auto key : touched) {
+			json::Object change;
+			change["id"] = key;
+			change["before"] = json::Null();
+			change["after"] = json::Null();
+			int row = 0;
+			for (auto const& line : context->ass->Events) {
+				++row;
+				if (line.Id == key) { change["before"] = Line(line, row, {}); break; }
+			}
+			row = 0;
+			for (auto const& line : staged.Events) {
+				++row;
+				if (line.Id == key) { change["after"] = Line(line, row, {}); break; }
+			}
+			changes.emplace_back(std::move(change));
+		}
+		json::Array style_changes;
+		for (auto const& name : styles) {
+			json::Object change;
+			change["name"] = name;
+			auto before = context->ass->GetStyle(name);
+			change["before"] = before ? json::UnknownElement(Style(*before)) : json::UnknownElement(json::Null());
+			change["after"] = Style(*staged.GetStyle(name));
+			style_changes.emplace_back(std::move(change));
+		}
+		batch.receipt["changes"] = std::move(changes);
+		batch.receipt["style_changes"] = std::move(style_changes);
+		batch.receipt["created_ids"] = std::move(created_ids);
+		batch.receipt["base_revision"] = revision;
+		batch.receipt["operation_id"] = id;
+		batch.receipt["window_id"] = window_id;
+		batch.receipt["label"] = batch.label;
+		// Keep recovery history bounded without evicting IDs and risking replay.
+		size_t retained = Serialize(batch.receipt).size() + batch.request.size();
+		for (auto const& [key, previous] : batches) retained += Serialize(previous.receipt).size() + previous.request.size();
+		if (retained > 16 * 1024 * 1024) throw std::runtime_error("Window operation history exceeds 16 MiB; use a new window");
+		found = batches.emplace(id, std::move(batch)).first;
+	}
+	if (found == batches.end()) {
+		if (method != "get_operation") throw std::runtime_error("Unknown operation; never recreate an uncertain applied operation automatically");
+		json::Object unknown;
+		unknown["operation_id"] = id;
+		unknown["window_id"] = window_id;
+		unknown["status"] = "unknown";
+		return unknown;
+	}
+	auto& batch = found->second;
+	if (method == "cancel_batch" && batch.status == "prepared") {
+		batch.status = "cancelled";
+		batch.staged.reset();
+	}
+	if (method == "apply_batch" && batch.status != "applied") {
+		if (batch.status != "prepared" || !batch.staged || batch.base_revision != revision ||
+			Integer(args.at("expected_revision"), 1, INT64_MAX) != revision)
+			throw std::runtime_error("Proposal is cancelled or stale; document revision conflict; rebuild and review it");
+		// Allocate the receipt and remapped selection before the no-throw list swaps.
+		batch.receipt["applied_revision"] = revision + 1;
+		Selection selection;
+		AssDialogue *active = nullptr;
+		std::set<int> selected;
+		for (auto line : context->selectionController->GetSelectedSet()) selected.insert(line->Id);
+		auto old_active = context->selectionController->GetActiveLine();
+		for (auto& line : batch.staged->Events) {
+			if (selected.count(line.Id)) selection.insert(&line);
+			if (old_active && old_active->Id == line.Id) active = &line;
+		}
+		if (!active) active = &batch.staged->Events.front();
+		selection.insert(active);
+		// Mark first so commit listeners cannot invalidate or destroy this batch.
+		batch.status = "applied";
+		context->ass->Events.swap(batch.staged->Events);
+		context->ass->Styles.swap(batch.staged->Styles);
+		context->ass->Commit(wxString::FromUTF8("MCP: " + batch.label), AssFile::COMMIT_NEW);
+		context->selectionController->SetSelectionAndActive(std::move(selection), active);
+		batch.staged.reset(); // old pointers stay alive through all commit listeners
+		batch.receipt["applied_revision"] = revision;
+	}
+	auto result = batch.receipt;
+	result["status"] = batch.status;
+	result["revision"] = revision;
+	result["receipt_scope"] = "this native window lifetime; survives client handoff, not application exit";
+	return result;
+}
+
 json::Object McpBridge::Dispatch(std::string const& method, json::Object const& args) {
 	json::Object result;
 	auto const& events = context->ass->Events;
+	if (method == "get_agent_status") {
+		Keys(args, {});
+		return AgentStatus();
+	}
+	if (method == "propose_batch" || method == "apply_batch" || method == "cancel_batch" || method == "get_operation")
+		return BatchCommand(method, args);
 	if (method == "get_context") {
 		Keys(args, {});
 		return Context();
 	}
 	else if (method == "render_preview") {
-		Keys(args, {"time_ms", "max_width", "max_height", "raw"});
+		Keys(args, {"time_ms", "max_width", "max_height", "raw", "operation_id"});
+		AssFile *subtitles = context->ass.get();
+		if (args.count("operation_id")) {
+			auto found = batches.find(OperationId(args.at("operation_id")));
+			if (found == batches.end() || found->second.status != "prepared" || !found->second.staged)
+				throw std::runtime_error("Proposal is unavailable or stale");
+			subtitles = found->second.staged.get();
+			result["operation_id"] = OperationId(args.at("operation_id"));
+		}
 		auto provider = context->project->VideoProvider();
 		if (!provider) throw std::runtime_error("Open a video or dummy video in this window before rendering a preview");
 		auto frame = context->videoController->GetFrameN();
@@ -432,7 +775,9 @@ json::Object McpBridge::Dispatch(std::string const& method, json::Object const& 
 		auto width = Integer(args.at("max_width"), 64, 1920);
 		auto height = Integer(args.at("max_height"), 64, 1080);
 		bool raw = args.at("raw");
-		provider->LoadSubtitles(context->ass.get());
+		// Restore the live renderer even if proposed-frame rendering fails.
+		struct Restore { AsyncVideoProvider *provider; AssFile *live; ~Restore() { provider->LoadSubtitles(live); } } restore{provider, context->ass.get()};
+		provider->LoadSubtitles(subtitles);
 		auto image = GetImage(*provider->GetFrame(frame, time, raw));
 		double scale = std::min({1.0, double(width) / image.GetWidth(), double(height) / image.GetHeight()});
 		if (scale < 1.0) image.Rescale(std::max(1, int(image.GetWidth() * scale)), std::max(1, int(image.GetHeight() * scale)), wxIMAGE_QUALITY_HIGH);
@@ -449,6 +794,7 @@ json::Object McpBridge::Dispatch(std::string const& method, json::Object const& 
 	else if (method == "get_document") {
 		Keys(args, {});
 		result["filename"] = context->subsController->Filename().string();
+		result["window_id"] = window_id;
 		result["modified"] = context->subsController->IsModified();
 		result["line_count"] = int64_t(std::distance(events.begin(), events.end()));
 		result["write_enabled"] = allow_write;
