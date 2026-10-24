@@ -732,7 +732,11 @@ json::Object McpBridge::BatchCommand(std::string const& method, json::Object con
 		batch.staged.reset(); // old pointers stay alive through all commit listeners
 		batch.receipt["applied_revision"] = revision;
 	}
-	auto result = batch.receipt;
+	// Cajun elements are move-only; retain the native receipt while returning
+	// an independent response that the transport can consume.
+	std::istringstream receipt_stream(Serialize(batch.receipt));
+	auto parsed_receipt = agi::json_util::parse(receipt_stream);
+	auto result = std::move(static_cast<json::Object&>(parsed_receipt));
 	result["status"] = batch.status;
 	result["revision"] = revision;
 	result["receipt_scope"] = "this native window lifetime; survives client handoff, not application exit";
