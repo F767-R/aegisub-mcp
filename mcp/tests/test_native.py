@@ -5,16 +5,182 @@ Only disposable fixture instances are terminated by these tests.
 import os
 import base64
 import struct
+import asyncio
+import json
+import signal
+import sys
+import time
+import uuid
 from pathlib import Path
 
 import pytest
 
-from aegisub_mcp.bridge import BridgeError, LaunchedSession
+from aegisub_mcp.bridge import BridgeError, LaunchedSession, atomic_json
 from aegisub_mcp.sessions import SessionManager
+from aegisub_mcp.sessions import process_alive
 
 EXE = os.environ.get("AEGISUB_MCP_TEST_EXE")
 pytestmark = pytest.mark.skipif(not EXE, reason="Native fork executable not supplied")
 FIXTURE = Path(__file__).parent / "fixtures" / "example.ass"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Exercise the native Windows menu command")
+@pytest.mark.parametrize("handoff_ui", ["menu", "panel"])
+async def test_native_menu_handoff_preserves_unsaved_document_and_history(handoff_ui):
+    import ctypes
+    from ctypes import wintypes
+
+    # Drive only this test's disposable GUI through its real menu command.
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    user.GetMenu.argtypes, user.GetMenu.restype = [wintypes.HWND], wintypes.HMENU
+    user.GetSubMenu.argtypes, user.GetSubMenu.restype = [wintypes.HMENU, ctypes.c_int], wintypes.HMENU
+    user.GetMenuItemCount.argtypes = [wintypes.HMENU]
+    user.GetMenuStringW.argtypes = [wintypes.HMENU, wintypes.UINT, wintypes.LPWSTR, ctypes.c_int, wintypes.UINT]
+    user.GetMenuItemID.argtypes, user.GetMenuItemID.restype = [wintypes.HMENU, ctypes.c_int], wintypes.UINT
+    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
+        wintypes.LPARAM, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    user.EnumChildWindows.argtypes = [wintypes.HWND, callback_type, wintypes.LPARAM]
+
+    def find_command(menu):
+        for index in range(user.GetMenuItemCount(menu)):
+            label = ctypes.create_unicode_buffer(512)
+            user.GetMenuStringW(menu, index, label, len(label), 0x400)
+            wanted = "Agent connection status" if handoff_ui == "panel" else "Disconnect current agent (allow another)"
+            if label.value.replace("&", "").startswith(wanted):
+                return user.GetMenuItemID(menu, index)
+            child = user.GetSubMenu(menu, index)
+            if child:
+                result = find_command(child)
+                if result is not None:
+                    return result
+        return None
+
+    session = LaunchedSession(Path(EXE), FIXTURE, True)
+    first, second = SessionManager(True), SessionManager(True)
+    try:
+        session.bridge.timeout = 60
+        original = await session.bridge.call("list_lines", dict(offset=0, limit=100, selected_only=False))
+        changed = await session.bridge.call("update_lines", dict(expected_revision=original["revision"],
+            updates=[dict(id=original["lines"][0]["id"], text="Unsaved handoff")]))
+        session.close()
+        first.set_client_info("Codex panel test", "0.4")
+        first.connect(session.directory.name)
+        found = []
+
+        @callback_type
+        def visit(window, unused):
+            pid = wintypes.DWORD()
+            user.GetWindowThreadProcessId(window, ctypes.byref(pid))
+            if pid.value == session.process.pid:
+                menu = user.GetMenu(window)
+                command = find_command(menu) if menu else None
+                if command is not None:
+                    found.append((window, command))
+            return True
+
+        user.EnumWindows(visit, 0)
+        assert len(found) == 1, "Handoff menu command missing from the native window"
+        assert user.PostMessageW(found[0][0], 0x111, found[0][1], 0)  # WM_COMMAND
+        if handoff_ui == "panel":
+            dialogs = []
+
+            @callback_type
+            def find_panel(window, unused):
+                pid = wintypes.DWORD()
+                user.GetWindowThreadProcessId(window, ctypes.byref(pid))
+                title = ctypes.create_unicode_buffer(256)
+                user.GetWindowTextW(window, title, len(title))
+                if pid.value == session.process.pid and title.value == "Agent connection":
+                    dialogs.append(window)
+                return True
+
+            async with asyncio.timeout(10):
+                while not dialogs:
+                    user.EnumWindows(find_panel, 0)
+                    await asyncio.sleep(0.05)
+            controls, displayed = [], []
+
+            @callback_type
+            def find_controls(window, unused):
+                title = ctypes.create_unicode_buffer(8192)
+                result = ctypes.c_size_t()
+                if user.SendMessageTimeoutW(window, 0xD, len(title), ctypes.addressof(title), 2, 2000, ctypes.byref(result)):
+                    displayed.append(title.value)
+                    if title.value == "Disconnect agent":
+                        controls.append(window)
+                return True
+
+            user.EnumChildWindows(dialogs[0], find_controls, 0)
+            assert any("Codex panel test" in text and "unsaved changes" in text for text in displayed), displayed
+            assert len(controls) == 1
+            # The panel is modeless: mailbox reads still work while it is open.
+            assert (await first.call("get_document"))["modified"]
+            assert user.PostMessageW(controls[0], 0xF5, 0, 0)  # BM_CLICK
+        async with asyncio.timeout(10):
+            while True:
+                replacements = [s for s in second.list_sessions()
+                    if s["pid"] == session.process.pid and s["session_id"] != session.directory.name]
+                if replacements:
+                    break
+                await asyncio.sleep(0.05)
+        with pytest.raises(BridgeError, match="disconnected"):
+            first.read_context()
+        current = second.connect(replacements[0]["session_id"])
+        assert current["modified"] and current["revision"] == changed["revision"]
+        assert session.process.poll() is None
+        lines = await second.call("list_lines", dict(offset=0, limit=100, selected_only=False))
+        assert lines["lines"][0]["text"] == "Unsaved handoff"
+        for _ in range(3):
+            with pytest.raises(BridgeError, match="explicitly connect_session"):
+                first.read_context()
+        await second.call("undo", dict(expected_revision=current["revision"]))
+        restored = await second.call("list_lines", dict(offset=0, limit=100, selected_only=False))
+        assert restored["lines"][0]["text"] == original["lines"][0]["text"]
+        if handoff_ui == "panel":
+            assert user.PostMessageW(dialogs[0], 0x10, 0, 0)  # WM_CLOSE
+    finally:
+        first.close()
+        second.close()
+        session.process.terminate()
+        session.process.wait(timeout=10)
+        session.close()
+
+
+async def test_native_explicit_window_survives_stdio_client_cleanup():
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    # The SDK's POSIX safe environment excludes DISPLAY/XAUTHORITY, which are
+    # needed to reach the test's Xvfb desktop. Do not forward unrelated secrets.
+    desktop_env = {name: os.environ[name] for name in
+        ('DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'LD_LIBRARY_PATH')
+        if name in os.environ}
+    params = StdioServerParameters(command=sys.executable, args=[
+        '-m', 'aegisub_mcp.server', '--attach', '--aegisub', str(Path(EXE).resolve()), '--allow-write'],
+        env=desktop_env)
+    pid = None
+    try:
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as client:
+                await client.initialize()
+                assert 'open_window' in {tool.name for tool in (await client.list_tools()).tools}
+                result = await client.call_tool('open_window', {'project_file': str(FIXTURE.resolve())})
+                assert not result.isError, result.content
+                opened = json.loads(result.content[0].text)
+                pid = opened['pid']
+                assert process_alive(pid)
+        await asyncio.sleep(0.3)
+        assert process_alive(pid), 'MCP client process-job cleanup closed the GUI'
+    finally:
+        # This PID belongs only to the disposable window created by this test.
+        if pid and process_alive(pid):
+            os.kill(pid, signal.SIGTERM)
 
 
 async def test_native_edits_conflicts_atomicity_and_undo():
@@ -213,6 +379,113 @@ async def test_native_layered_effects_styles_and_history():
         await bridge.call("undo", dict(expected_revision=cleared["revision"]))
         assert [line["text"] for line in (await lines())["lines"]] == ["Hello", "World"]
     finally:
+        session.process.terminate()
+        session.process.wait(timeout=10)
+        session.close()
+
+
+async def test_native_review_batches_lost_response_handoff_and_single_undo(tmp_path):
+    fixture = tmp_path / "batch-preview.ass"
+    source = FIXTURE.read_text(encoding="utf-8")
+    source = source.replace("PlayResY: 1080", "PlayResY: 1080\nLayoutResX: 1920\nLayoutResY: 1080\nYCbCr Matrix: None")
+    source = source.replace("[V4+ Styles]", "[Aegisub Project Garbage]\nVideo File: ?dummy:25:250:1920:1080:0:0:0:\n\n[V4+ Styles]")
+    fixture.write_text(source, encoding="utf-8")
+    session = LaunchedSession(Path(EXE), fixture, True)
+    session.bridge.timeout = 60
+    bridge = session.bridge
+    manager = SessionManager(True, session.directory.parent)
+    async def lines(target=bridge):
+        return await target.call("list_lines", dict(offset=0, limit=100, selected_only=False))
+    try:
+        original = await lines()
+        first, second = [line["id"] for line in original["lines"]]
+        rev = original["revision"]
+        document = await bridge.call("get_document")
+        bridge.set_client_info("Codex test", "0.4")
+        status = await bridge.call("get_agent_status")
+        assert status["ownership"] == "connected"
+        assert status["client_name"] == "Codex test" and status["native_ready"]
+        operation = dict(operation_id=uuid.uuid4().hex, expected_revision=rev, label="Reviewed effect",
+            operations=[
+                dict(method="create_style", name="Draft", properties={"font_size": 140}),
+                dict(method="update_lines", updates=[dict(id=first, text="PROPOSED", style="Draft")]),
+                dict(method="shift_times", ids=[first], delta_ms=100),
+                dict(method="delete_lines", ids=[second]),
+                dict(method="create_lines", lines=[dict(text="New row", start_ms=4000, end_ms=5000, style="Draft")]),
+            ])
+        prepared = await bridge.call("propose_batch", operation)
+        assert prepared["status"] == "prepared" and prepared["revision"] == rev
+        assert (await lines()) == original
+        assert (await bridge.call("get_document")) == document
+        assert (await bridge.call("propose_batch", operation)) == prepared
+        with pytest.raises(BridgeError, match="different proposal"):
+            await bridge.call("propose_batch", dict(operation, label="Changed"))
+        # Invalid final operation must not leak preceding staged edits.
+        bad = dict(operation, operation_id=uuid.uuid4().hex,
+            operations=operation["operations"] + [dict(method="update_lines", updates=[dict(id=2147483647, text="bad")])])
+        with pytest.raises(BridgeError, match="Unknown subtitle"):
+            await bridge.call("propose_batch", bad)
+        assert (await lines()) == original
+        preview_args = dict(time_ms=1500, max_width=320, max_height=180, raw=False)
+        before = await bridge.call("render_preview", preview_args)
+        after = await bridge.call("render_preview", dict(preview_args, operation_id=operation["operation_id"]))
+        assert before["png_base64"] != after["png_base64"]
+        assert (await bridge.call("render_preview", preview_args))["png_base64"] == before["png_base64"]
+        assert (await lines()) == original
+        cancelled = dict(operation, operation_id=uuid.uuid4().hex)
+        await bridge.call("propose_batch", cancelled)
+        assert (await bridge.call("cancel_batch", {"operation_id": cancelled["operation_id"]}))["status"] == "cancelled"
+        with pytest.raises(BridgeError, match="cancelled or stale"):
+            await bridge.call("apply_batch", dict(operation_id=cancelled["operation_id"], expected_revision=rev))
+        assert (await lines()) == original
+        # Publish an application, then deliberately discard its response before a
+        # client consumes it. The next process must recover from native history.
+        request_id = uuid.uuid4().hex
+        atomic_json(session.directory / "request.json", dict(id=request_id, token=bridge.token,
+            method="apply_batch", args=dict(operation_id=operation["operation_id"], expected_revision=rev),
+            expires_ms=int((time.time() + 60) * 1000)))
+        response = session.directory / f"{request_id}.json"
+        async with asyncio.timeout(60):
+            while not response.exists():
+                await asyncio.sleep(0.05)
+        response.unlink()
+        session.close()
+        manager.set_client_info("Claude test", "0.4")
+        manager.connect(session.directory.name)
+        receipt = await manager.call("get_operation", dict(operation_id=operation["operation_id"]))
+        assert receipt["status"] == "applied"
+        assert receipt["applied_revision"] == rev + 1
+        assert receipt["window_id"] == document["window_id"]
+        status = await manager.call("get_agent_status")
+        assert status["client_name"] == "Claude test" and status["ownership"] == "connected"
+        applied = await lines(manager)
+        assert [line["text"] for line in applied["lines"]] == ["PROPOSED", "New row"]
+        assert applied["lines"][0]["id"] == first
+        assert applied["lines"][0]["start_ms"] == 1100
+        repeated = await manager.call("apply_batch", dict(operation_id=operation["operation_id"], expected_revision=rev))
+        assert repeated["applied_revision"] == receipt["applied_revision"]
+        assert await lines(manager) == applied
+        await manager.call("undo", dict(expected_revision=applied["revision"]))
+        undone = await lines(manager)
+        assert undone["lines"] == original["lines"]
+        assert [style["name"] for style in (await manager.call("list_styles"))["styles"]] == ["Default"]
+        # Retry after Undo must return history, not replay the application.
+        await manager.call("apply_batch", dict(operation_id=operation["operation_id"], expected_revision=undone["revision"]))
+        assert await lines(manager) == undone
+        await manager.call("redo", dict(expected_revision=undone["revision"]))
+        assert (await lines(manager))["lines"] == applied["lines"]
+        current = await lines(manager)
+        stale = dict(operation, operation_id=uuid.uuid4().hex, expected_revision=current["revision"],
+                     operations=[dict(method="update_lines", updates=[dict(id=first, text="Stale")])])
+        await manager.call("propose_batch", stale)
+        await manager.call("update_lines", dict(expected_revision=current["revision"], updates=[dict(id=first, text="Manual edit")]))
+        with pytest.raises(BridgeError, match="cancelled or stale"):
+            await manager.call("apply_batch", dict(operation_id=stale["operation_id"], expected_revision=stale["expected_revision"]))
+        assert (await lines(manager))["lines"][0]["text"] == "Manual edit"
+        assert (await manager.call("get_operation", dict(operation_id=stale["operation_id"])))["status"] == "stale"
+        assert (await manager.call("get_operation", dict(operation_id=uuid.uuid4().hex)))["status"] == "unknown"
+    finally:
+        manager.close()
         session.process.terminate()
         session.process.wait(timeout=10)
         session.close()

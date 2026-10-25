@@ -108,6 +108,8 @@ async def test_switching_does_not_release_lease_during_inflight_request(tmp_path
         await started.wait()
         with pytest.raises(BridgeError, match="current tool call"):
             manager.connect(second.name)
+        with pytest.raises(BridgeError, match="current tool call"):
+            manager.disconnect()
         with pytest.raises(BridgeError, match="already connected"):
             ClientLease(directory)
         finish.set()
@@ -117,3 +119,88 @@ async def test_switching_does_not_release_lease_during_inflight_request(tmp_path
         finish.set()
         await task
         manager.close()
+
+
+def test_disconnect_releases_for_other_client_without_background_reacquisition(tmp_path):
+    directory = make_session(tmp_path)
+    first, second = SessionManager(True, tmp_path), SessionManager(True, tmp_path)
+    try:
+        original = first.connect(directory.name)
+        assert first.disconnect() == {"disconnected": True, "previous_session_id": directory.name}
+        for _ in range(3):
+            with pytest.raises(BridgeError, match="explicitly connect_session"):
+                first.read_context()
+        assert second.connect(directory.name) == original
+        second.disconnect()
+        with pytest.raises(BridgeError, match="explicitly connect_session"):
+            first.read_context()
+        assert first.connect(directory.name) == original
+        assert (directory / "session.json").exists()
+    finally:
+        first.close()
+        second.close()
+
+
+async def test_gui_handoff_revokes_pending_call_and_does_not_attach_to_replacement(tmp_path):
+    directory = make_session(tmp_path)
+    first, second = SessionManager(True, tmp_path), SessionManager(True, tmp_path)
+    task = None
+    try:
+        first.connect(directory.name)
+        old_bridge = first.bridge
+        task = asyncio.create_task(first.call("get_document"))
+        async with asyncio.timeout(2):
+            while not (directory / "request.json").exists():
+                await asyncio.sleep(0.005)
+        # The native menu rotates the directory and token on the same GUI thread.
+        (directory / "session.json").unlink()
+        replacement = make_session(tmp_path, "e" * 32)
+        assert second.connect(replacement.name)["revision"] == 4
+        # Background observers must not release an in-flight call's OS lease.
+        with pytest.raises(BridgeError, match="disconnected"):
+            first.read_context()
+        with pytest.raises(BridgeError, match="already connected"):
+            ClientLease(directory)
+        async with asyncio.timeout(2):
+            with pytest.raises(BridgeError, match="disconnected"):
+                await task
+        assert first.lease is None
+        assert old_bridge._failed
+        ClientLease(directory).close()
+        assert not (directory / "request.json").exists()
+        assert not (replacement / "request.json").exists()
+        for _ in range(3):
+            with pytest.raises(BridgeError, match="explicitly connect_session"):
+                first.read_context()
+        assert first.session_id is None
+        assert second.session_id == replacement.name
+    finally:
+        if task and not task.done():
+            task.cancel()
+        first.close()
+        second.close()
+
+
+async def test_disconnect_tool_allows_handoff_between_live_mcp_clients(tmp_path):
+    from mcp.shared.memory import create_connected_server_and_client_session
+    from aegisub_mcp.server import create_server
+
+    directory = make_session(tmp_path)
+    first, second = SessionManager(False, tmp_path), SessionManager(False, tmp_path)
+    try:
+        async with create_connected_server_and_client_session(create_server(first)) as a:
+            async with create_connected_server_and_client_session(create_server(second)) as b:
+                assert not (await a.call_tool("connect_session", {"session_id": directory.name})).isError
+                await a.subscribe_resource("aegisub://context")
+                assert (await b.call_tool("connect_session", {"session_id": directory.name})).isError
+                assert not (await a.call_tool("disconnect_session", {})).isError
+                # Exercise the subscription watcher's real polling interval.
+                await asyncio.sleep(0.35)
+                assert first.session_id is None
+                assert not (await b.call_tool("connect_session", {"session_id": directory.name})).isError
+                assert (await a.call_tool("get_context", {})).isError
+                assert not (await b.call_tool("disconnect_session", {})).isError
+                assert not (await a.call_tool("connect_session", {"session_id": directory.name})).isError
+    finally:
+        first.close()
+        second.close()

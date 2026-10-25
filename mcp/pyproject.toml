@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aegisub-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local MCP server for the Aegisub MCP fork"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.26,<2"]
+dependencies = ["mcp>=1.26,<2", "pywin32>=311; sys_platform == 'win32'"]
 license = "BSD-3-Clause"
 
 [project.optional-dependencies]

@@ -37,6 +37,7 @@
 
 #include "../compat.h"
 #include "../dialog_detached_video.h"
+#include "../dialog_agent.h"
 #include "../dialog_manager.h"
 #include "../dialogs.h"
 #include "../frame_main.h"
@@ -50,6 +51,14 @@
 
 namespace {
 	using cmd::Command;
+
+struct app_agent_status final : public Command {
+	CMD_NAME("app/agent/status")
+	STR_MENU("Agent connection status...")
+	STR_DISP("Agent connection status")
+	STR_HELP("Show the connected agent, recent commands and access controls")
+	void operator()(agi::Context *c) override { c->dialog->Show<DialogAgent>(c); }
+};
 
 struct app_agent_read final : public Command {
 	CMD_NAME("app/agent/read")
@@ -77,10 +86,23 @@ struct app_agent_write final : public Command {
 	void operator()(agi::Context *c) override { c->frame->GetMcpBridge()->Enable(true); }
 };
 
+struct app_agent_release final : public Command {
+	CMD_NAME("app/agent/release")
+	STR_MENU("Disconnect current agent (allow another)")
+	STR_DISP("Disconnect current agent (allow another)")
+	STR_HELP("Release Codex or Claude and leave this window available for another agent to connect")
+	CMD_TYPE(COMMAND_VALIDATE)
+	bool Validate(agi::Context const *c) override {
+		auto bridge = c->frame->GetMcpBridge();
+		return bridge && bridge->IsActive();
+	}
+	void operator()(agi::Context *c) override { c->frame->GetMcpBridge()->ReleaseClient(); }
+};
+
 struct app_agent_disconnect final : public Command {
 	CMD_NAME("app/agent/disconnect")
-	STR_MENU("Disconnect agent")
-	STR_DISP("Disconnect agent")
+	STR_MENU("Disable all agent access")
+	STR_DISP("Disable all agent access")
 	STR_HELP("Disable agent access to this window without discarding unsaved work")
 	CMD_TYPE(COMMAND_RADIO)
 	bool IsActive(agi::Context const *c) override {
@@ -376,8 +398,10 @@ struct app_show_all final : public Command {
 
 namespace cmd {
 	void init_app() {
+		reg(std::make_unique<app_agent_status>());
 		reg(std::make_unique<app_agent_read>());
 		reg(std::make_unique<app_agent_write>());
+		reg(std::make_unique<app_agent_release>());
 		reg(std::make_unique<app_agent_disconnect>());
 		reg(std::make_unique<app_about>());
 		reg(std::make_unique<app_display_audio_subs>());

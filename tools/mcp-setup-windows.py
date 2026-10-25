@@ -58,9 +58,11 @@ def configure_desktop(destination, server=None):
     return backup
 
 
-def server_config(root, read_only=False, attach=False):
+def server_config(root, read_only=False, attach=True):
     args = ["-m", "aegisub_mcp.server"]
-    args += ["--attach"] if attach else ["--aegisub", str(root / "aegisub.exe")]
+    if attach:
+        args += ["--attach"]
+    args += ["--aegisub", str(root / "aegisub.exe")]
     if not read_only:
         args.append("--allow-write")
     return {"command": str(root / ".venv" / "Scripts" / "python.exe"), "args": args}
@@ -73,7 +75,11 @@ def main():
     desktop.add_argument("--remove-claude-desktop", action="store_true", help="Disconnect from Claude Desktop")
     parser.add_argument("--skip-install", action="store_true", help="Reuse the existing Python environment")
     parser.add_argument("--read-only", action="store_true", help="Expose only read tools")
-    parser.add_argument("--attach", action="store_true", help="Connect to enabled open windows instead of launching another")
+    connection = parser.add_mutually_exclusive_group()
+    connection.add_argument("--attach", dest="attach", action="store_true", default=True,
+                            help="Connect to open windows; open_window launches only on request (default)")
+    connection.add_argument("--launch-on-connect", dest="attach", action="store_false",
+                            help="Legacy mode: start a new window for every client connection")
     options = parser.parse_args()
     if sys.version_info < (3, 11):
         raise SystemExit("Python 3.11 or newer is required.")
@@ -110,7 +116,7 @@ def main():
         print(f"Claude Desktop configured: {desktop_path}")
         if backup:
             print(f"Previous settings: {backup}")
-        print("Fully quit and reopen Claude Desktop, then ask it to use Aegisub's get_document tool.")
+        print("Fully quit and reopen Claude Desktop, then ask it to list Aegisub sessions or use open_window when you want a new window.")
         print("To disconnect later: setup-mcp.cmd --remove-claude-desktop")
     print("Read-only access." if options.read_only else "Subtitle editing enabled. Use --read-only for read-only access.")
     print("Keep this folder in place: the generated configuration uses absolute paths.")

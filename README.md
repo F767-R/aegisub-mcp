@@ -14,6 +14,28 @@ video seeking, and bounded audio audition. Enable a window in **View > Agent
 connection**, then configure the server with `--attach`. Existing launch-mode
 configuration remains supported. A matching 0.3 native build is required.
 
+Server 0.3.1 adds an explicit `open_window` tool. Setup defaults to
+`--attach --aegisub PATH`: connecting/discovering tools never opens a GUI;
+the agent can open one window when requested. The new window survives client
+disconnects, including Windows clients that terminate MCP process jobs. Windows
+uses the local process provider to launch the requested GUI independently.
+
+Version 0.4.0 adds **View > Agent connection status...** with the verified native
+lease owner, client identity, last command/error, pending proposals and access
+controls. `propose_batch` stages subtitle and style changes for a before/after
+diff and optional `render_preview(operation_id=...)`; `apply_batch` commits them
+as one Undo step. Query `get_operation` after a lost response to avoid repeating
+an edit. Receipts survive client handoff for the native window's lifetime, but do
+not survive application exit. The upstream media-path/index-cache fix (#752) is
+also included. Update the native application and Python server together.
+
+Version 0.3.2 added **View > Disconnect current agent (allow another)**. It revokes
+the current client's connection while keeping the document open and agent access
+enabled. The other agent can use `list_sessions` and `connect_session` on demand.
+The disconnected client cannot reconnect through background polling; it must
+explicitly connect again. `disconnect_session` also lets an agent release its own
+connection. **Disable all agent access** keeps every client disconnected instead.
+
 See **[MCP setup and usage](docs/mcp.md)**. The integration consists of a native
 bridge in this fork plus a Python stdio server in `mcp/`. An upstream Aegisub
 binary does not contain the bridge. Normal launches leave MCP disabled.

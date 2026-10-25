@@ -1,6 +1,6 @@
 # Aegisub MCP
 
-This fork lets an MCP client work with a live Aegisub document. Version **0.3.0**
+This fork lets an MCP client work with a live Aegisub document. Version **0.4.0**
 supports both launching a dedicated window and connecting to an already-open
 window that you enable in the fork's View menu. It cannot attach to an unmodified
 upstream binary. On first launch, finish language/update prompts before calling tools.
@@ -9,11 +9,11 @@ upstream binary. On first launch, finish language/update prompts before calling 
 
 1. In the matching 0.3 native fork, open your subtitle project normally.
 2. Choose **View > Agent connection: allow editing**, or **read only**.
-3. Configure the Python server with `--attach` instead of `--aegisub PATH`:
+3. Configure the Python server with `--attach --aegisub PATH`:
 
    ```json
    {"mcpServers":{"aegisub":{"command":"C:/path/to/.venv/Scripts/python.exe",
-     "args":["-m","aegisub_mcp.server","--attach","--allow-write"]}}}
+     "args":["-m","aegisub_mcp.server","--attach","--aegisub","C:/path/to/aegisub.exe","--allow-write"]}}}
    ```
 
    Portable Windows setup also accepts `setup-mcp.cmd --attach`, or
@@ -21,13 +21,55 @@ upstream binary. On first launch, finish language/update prompts before calling 
 4. Ask the agent to use `list_sessions`, then `connect_session` with the intended
    window's ID. A single enabled window is selected automatically on the first read.
 
+### Open a new window on request (server 0.3.1)
+
+With `--attach --aegisub PATH`, the agent also receives `open_window`.
+Call `open_window()` for a blank document, or
+`open_window(project_file="C:/path/to/subtitles.ass")` to open an existing local
+subtitle file. Each explicit call creates one new window and connects to it;
+existing documents and unsaved work stay open. Native 0.3 builds are compatible.
+Tool discovery, enabling MCP, and client reconnects never invoke this tool.
+
+The window is created through a short-lived independent launcher. On Windows,
+the local process provider keeps it outside the MCP client's kill-on-close job;
+the base Python interpreter avoids extra venv redirector jobs. It therefore
+survives clients that terminate their process jobs on disconnect. Finish any first-run
+or linked-media prompts in the GUI. If a call fails or is cancelled, inspect
+`list_sessions` before retrying; a window might already have started.
+
+Windows setup now defaults to this mode. `--attach` without `--aegisub` remains
+supported for connecting only, and exposes no window-opening tool. Use
+`setup-mcp.cmd --launch-on-connect` only if you deliberately want the legacy
+behavior of opening a new GUI for every MCP connection.
+
 The client holds an exclusive OS lease, so two clients cannot overwrite each
 other's mailbox. Disconnecting or restarting the client releases that lease and
 leaves the GUI and unsaved work open. Native access remains enabled until you
-choose **View > Disconnect agent** or close the window. Changing access mode
+choose **View > Disable all agent access** or close the window. Changing access mode
 rotates the session ID and credentials, revoking the previous connection.
 Additional windows can each be enabled independently through their View menu.
 The server never enables access in a window by itself.
+
+### Switch between Codex and Claude (0.3.2)
+
+Choose **View > Disconnect current agent (allow another)** in the Aegisub window.
+This revokes the current client's session and publishes a fresh session for the
+same window. It preserves read-only/editing permissions, unsaved subtitles,
+selection, media, and Undo history. It never starts or closes a window.
+
+Ask the other agent to call `list_sessions`, then `connect_session` with the
+window's new ID. Only the client that explicitly connects takes control.
+The disconnected client cannot reclaim the window through background resource
+polling or ordinary tool calls; it must explicitly connect again. To switch back,
+repeat the menu command and ask the first agent to connect.
+
+An agent can also call `disconnect_session` to release its own connection without
+rotating the native session. Its background polling stays disconnected. The
+separate **Disable all agent access** option makes the window unavailable to
+every client until you enable read-only or editing access again. The handoff
+menu requires the 0.3.2 native build; the disconnect tool works with native 0.3.
+If a request was in flight when disconnected, inspect the document before
+retrying it: the GUI may already have applied it. Requests are never retried.
 
 `python -m aegisub_mcp.server --list-sessions` prints discoverable windows without
 exposing tokens. Discovery uses per-user local application data, not a network
@@ -61,11 +103,64 @@ editor's loaded media. These controls require editing access and a current
 document revision, but do not create subtitle Undo steps. Media opening stays in
 the GUI.
 
+## Agent status and reviewed batches (0.4)
+
+Use **View > Agent connection status...** for a modeless panel with access controls,
+the connected client's self-reported name/version, verified OS-lease ownership,
+last command/error, and pending proposal labels. A stale identity file after a
+client crash does not count as ownership. `get_agent_status` exposes the same
+diagnostics; neither can certify tool availability inside the agent conversation.
+The panel can release ownership, disable access, or change read/edit access while
+preserving the open document. Changing access rotates the session; reconnect explicitly.
+
+For an operation spanning several edits:
+
+1. Read `get_context` and generate a fresh 32-character lowercase hexadecimal
+   `operation_id`. Retain the ID before sending a request.
+2. Call `propose_batch(operation_id, expected_revision, label, operations)`.
+   Operations are ordered objects with `method` and the usual edit arguments,
+   without an inner revision. Supported methods are `create_lines`, `update_lines`,
+   `delete_lines`, `shift_times`, `create_style`, and `update_style`.
+3. Review the returned `changes` and `style_changes` before/after records. A new
+   style may be used by later operations in the same batch. A style change can
+   affect every line using it, including lines not in the explicit line diff.
+   `render_preview(operation_id=..., time_ms=...)` renders the proposal separately
+   and restores the live renderer. It requires loaded video or dummy video.
+4. Apply the reviewed proposal with `apply_batch(operation_id, expected_revision)`.
+   It creates one Undo entry for the entire batch. Edits or saves since preparation
+   invalidate the proposal. `cancel_batch` discards a pending proposal only.
+
+Example operations:
+
+```json
+[
+  {"method":"create_style","name":"Highlight","properties":{"font_size":60}},
+  {"method":"update_lines","updates":[{"id":42,"style":"Highlight"}]},
+  {"method":"shift_times","ids":[42],"delta_ms":100}
+]
+```
+
+After a timeout or disconnect, reconnect explicitly and call
+`get_operation(operation_id)` before doing anything else. A repeated `apply_batch`
+for an applied ID returns its receipt without changing the document, even after
+Undo or client handoff. Identical proposal retries also return the existing record;
+reusing an ID with different content fails. `status=unknown` is not proof that an
+edit never happened: check the returned `window_id` and current document.
+
+Recovery history lives in the native window, not in the client process. It survives
+handoff and access-mode changes but ends when that window exits. It does not provide
+disk-persistent crash recovery. Limits: 50 operations / 500 total edits per batch,
+1 MiB proposal request, four pending document copies, and 128 retained records or
+16 MiB of request/diff history per window. History is never silently evicted;
+reaching a limit rejects a new proposal. Applied receipts describe the historical
+commit, not whether a later Undo has reversed it. Cancel does not undo an applied batch.
+
 ## Setup
 
-This server requires the **0.3.0 server and matching native build** for session
+This server requires a **0.3 or newer native build** for session
 discovery, live context, and previews. Older Windows releases do not contain these
 features; update both the application and Python server together.
+Agent status and reviewed batches require the matching **0.4 native build**.
 See [Windows build and monitoring instructions](build-mcp-windows.md) to build
 the current branch and follow its progress yourself.
 
@@ -91,8 +186,8 @@ assets include SHA-256 checksums. Python is required for MCP, not ordinary editi
 Install and run Claude Desktop, then fully quit it (including the system tray).
 In the portable folder, double-click **`setup-claude-desktop.cmd`**. It installs
 the server if needed, or reuses the environment from `setup-mcp.cmd`. Reopen
-Claude Desktop and ask: "Use Aegisub's get_document tool, then list its styles."
-Open your subtitle file in the Aegisub window that Claude launches.
+Claude Desktop and ask: "List the enabled Aegisub windows and connect to mine."
+Enable your window in its View menu, or explicitly ask Claude to open a new one.
 
 Setup merges only `mcpServers.aegisub` into
 `%APPDATA%\Claude\claude_desktop_config.json`, preserving other servers and
@@ -195,6 +290,7 @@ rather than a browser-only chat at claude.ai.
 | `list_lines` | Paginated subtitle text, timestamps, metadata, IDs and selection |
 | `list_styles` | Style names, structured properties, and full ASS definitions |
 | `list_sessions` / `connect_session` | Discover and select an enabled open window (attach mode) |
+| `open_window` | Open one new window on request, optionally with a local subtitle file (attach mode plus executable path) |
 | `get_context` / `wait_for_context` | Read or wait for selection, playhead, media and document context |
 | `render_preview` | Render the current unsaved subtitles over a video frame as a PNG image |
 | `seek_video` / `play_audio` / `stop_playback` | Control loaded media without editing subtitle content |
